@@ -30,9 +30,9 @@ from config import get_tiny_tab_config
 from dataloader import TabDataset
 
 try:
-    from open_fret.training import resolve_resume_checkpoint
+    from open_fret.training import load_init_model, resolve_resume_checkpoint
 except ImportError:  # when run as scripts/train_model.py without root on path
-    from open_fret.training import resolve_resume_checkpoint
+    from open_fret.training import load_init_model, resolve_resume_checkpoint
 
 
 class TrainLoggerCallback(TrainerCallback):
@@ -82,6 +82,11 @@ def parse_args():
                    help="Resume from latest checkpoint in --output-dir, "
                         "or from PATH if a path is given. Omit for fresh training.")
     p.add_argument("--max-length", type=int, default=512)
+    p.add_argument("--init-from", default=None,
+                   help="Optional pretrained T5 endpoint (HF hub id or local path, "
+                        "e.g. 't5-small') to fine-tune instead of training from scratch.")
+    p.add_argument("--dropout", type=float, default=None,
+                   help="Override config dropout_rate (both scratch and pretrained).")
     return p.parse_args()
 
 
@@ -99,8 +104,13 @@ def train(args=None):
             "Run 01.5_generate_vocab.py and 02_tokenize.py first.")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
 
-    config = get_tiny_tab_config(vocab_size=len(tokenizer))
-    model = T5ForConditionalGeneration(config)
+    config = None
+    model, init_info = load_init_model(
+        tokenizer, init_from=args.init_from,
+        tiny_config_fn=get_tiny_tab_config, dropout=args.dropout)
+    print(f"Model init: {init_info}")
+    if args.init_from is None and args.dropout is not None:
+        print(f"Overrode tiny-tab dropout_rate to {args.dropout}")
 
     if os.path.exists(args.cache_dir):
         print(f"Loading high-speed cached dataset from {args.cache_dir}")
@@ -181,6 +191,8 @@ def train(args=None):
             "grad_accum": args.grad_accum, "lr": args.lr, "seed": args.seed,
             "tokenizer_dir": args.tokenizer_dir, "cache_dir": args.cache_dir,
             "mode": mode, "resume_checkpoint": resume_checkpoint,
+            "init_from": args.init_from, "init_info": init_info,
+            "dropout": args.dropout,
         }, f, indent=2)
 
 

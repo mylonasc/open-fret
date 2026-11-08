@@ -48,11 +48,17 @@ def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    if not os.path.isdir(model_dir):
-        raise FileNotFoundError(f"Model directory not found: {model_dir}")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = T5ForConditionalGeneration.from_pretrained(model_dir).to(device)
+    # model_dir may be a local path or a Hugging Face hub id (local fine-tune
+    # or pretrained endpoint). from_pretrained handles both; surface a clear
+    # error instead of a bare stack trace when neither resolves.
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Could not load tokenizer from {model_dir!r}: {e}") from e
+    try:
+        model = T5ForConditionalGeneration.from_pretrained(model_dir).to(device)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Could not load model from {model_dir!r}: {e}") from e
     model.eval()
 
     midi_tokens = midi_to_tokens(midi_path)
@@ -91,7 +97,9 @@ def main():
     parser.add_argument("--midi", type=str, required=True, help="Path to input MIDI file")
     parser.add_argument("--input", type=str, default=None,
                         help="Alias for --midi (backwards compat with README).")
-    parser.add_argument("--model", type=str, default="models/tiny-tab-v1/final")
+    parser.add_argument("--model", type=str, default="models/tiny-tab-v1/final",
+                        help="Local model dir or HF hub id (e.g. 't5-small' for a "
+                             "pretrained baseline, though it won't know TAB tokens).")
     parser.add_argument("--out", type=str, default=None, help="Write token output to file.")
     parser.add_argument("--stochastic", action="store_true",
                         help="Use sampling instead of deterministic decoding.")

@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 
 TICKS_PER_QUARTER = 480
-DEFAULT_TUNING_MIDI = [64, 59, 55, 50, 45, 40]  # E4 B3 G3 D3 A2 E2
+DEFAULT_TUNING_MIDI = [64, 59, 55, 50, 45, 40]  # E5 B4 G4 D4 A3 E3 (dataset convention) = concert MIDI
 DEFAULT_TEMPO = 120
 
 _NOTE_MAP = {
@@ -71,14 +71,21 @@ class ParsedTrack:
 
 
 def parse_tuning(tuning_str: str) -> list[int]:
-    """Convert e.g. ``E4 B3 G3 D3 A2 E2`` to MIDI numbers (high-e first)."""
+    """Convert e.g. ``E5 B4 G4 D4 A3 E3`` to MIDI numbers (high-e first).
+
+    Uses the dataset/upstream convention (see ``_parse_tuning`` in
+    vladsavelyev/guitartab): ``value = octave * 12 + note`` where C=0..B=11,
+    so standard tuning ``E5 B4 G4 D4 A3 E3`` maps to ``[64, 59, 55, 50, 45, 40]``
+    (concert MIDI). NOTE: this is one octave above scientific pitch notation
+    names (middle C = C5 here); do NOT add 1 to the octave.
+    """
     midi_numbers: list[int] = []
     for token in tuning_str.split():
         m = _TUNING_RE.fullmatch(token)
         if not m:
             continue
         name, octave = m.groups()
-        midi_numbers.append((int(octave) + 1) * 12 + _NOTE_MAP[name])
+        midi_numbers.append(int(octave) * 12 + _NOTE_MAP[name])
     return midi_numbers
 
 

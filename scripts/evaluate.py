@@ -47,10 +47,12 @@ def evaluate_model(model_path, dataset_path, split="test", num_samples=100,
                    max_new_tokens=256, report_path=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Evaluating on {device} (split={split})...")
-    if not os.path.isdir(model_path):
-        raise FileNotFoundError(f"Model directory not found: {model_path}")
-    model = T5ForConditionalGeneration.from_pretrained(model_path).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # model_path may be a local dir or HF hub id.
+    try:
+        model = T5ForConditionalGeneration.from_pretrained(model_path).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"Could not load model/tokenizer from {model_path!r}: {e}") from e
     dataset = load_from_disk(dataset_path)
     if split not in dataset:
         raise ValueError(

@@ -36,6 +36,9 @@ def parse_args():
     p.add_argument("--output-root", default="models/hpo")
     p.add_argument("--max-epochs", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--init-from", default=None,
+                   help="Optional pretrained T5 endpoint to fine-tune per trial "
+                        "instead of training from scratch.")
     return p.parse_args()
 
 
@@ -65,9 +68,11 @@ def objective(trial, args):
     params = suggest(trial)
     set_seed(args.seed + trial.number)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
-    config = get_tiny_tab_config(vocab_size=len(tokenizer))
-    config.dropout_rate = params["dropout"]
-    model = T5ForConditionalGeneration(config)
+    from open_fret.training import load_init_model
+    model, init_info = load_init_model(
+        tokenizer, init_from=args.init_from,
+        tiny_config_fn=get_tiny_tab_config, dropout=params["dropout"])
+    print(f"Trial {trial.number} init: {init_info} params={params}")
     dataset = load_from_disk(args.cache_dir)
     if "validation" not in dataset:
         raise ValueError("HPO requires a validation split in the cached dataset.")
@@ -116,7 +121,7 @@ def main():
     os.makedirs(args.output_root, exist_ok=True)
     with open(best_path, "w", encoding="utf-8") as f:
         json.dump({"params": study.best_params, "value": study.best_value,
-                   "study": args.study_name}, f, indent=2)
+                   "study": args.study_name, "init_from": args.init_from}, f, indent=2)
     print(f"Wrote {best_path}. Retrain with scripts/train_model.py using these values.")
 
 

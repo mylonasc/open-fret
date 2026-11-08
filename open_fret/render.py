@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-STANDARD_TUNING_STR = "E4 B3 G3 D3 A2 E2"
+STANDARD_TUNING_STR = "E5 B4 G4 D4 A3 E3"
 
 _DUR_MAP = {
     1920: ":1", 1440: ":1.", 960: ":2", 720: ":2.",
