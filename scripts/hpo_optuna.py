@@ -33,7 +33,9 @@ SPACE = {
     "warmup_examples": [10000, 50000, 100000],
     "decay_after_examples": [10000, 50000, 100000],
     "decay_factor": [0.1, 0.3, 0.5],
-    "batch_size": [16, 32, 64, 96],
+    # Sized to saturate 24GB VRAM on this tiny model (batch 32 ~= 4.6GB,
+    # batch 96 ~= 10GB). Upper choices may OOM -> recorded as oom trials.
+    "batch_size": [32, 64, 96, 128, 192, 256],
     "grad_accum": [1, 2],
 }
 
@@ -180,7 +182,18 @@ def objective(trial, args):
     trainer = Trainer(model=model, args=targs, train_dataset=train_ds,
                       eval_dataset=val_ds, optimizers=(optimizer, scheduler),
                       callbacks=[TimeCapCallback(args.time_limit), history_cb])
-    trainer.train()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    try:
+        train_result = trainer.train()
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            trial.set_user_attr("oom", True)
+            trial.set_user_attr("batch_size", params["batch_size"])
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            raise
+        raise
     metrics = trainer.evaluate()
     val_loss = float(metrics.get("eval_loss", float("inf")))
 
@@ -200,6 +213,27 @@ def objective(trial, args):
     trial.set_user_attr("eval_loss_steps",
                         [p["step"] for p in history_cb.eval_curve])
     trial.set_user_attr("params_json", params)
+    # Memory saturation + stability: the raw material for "max stable batch".
+    peak_gb = (float(torch.cuda.max_memory_allocated() / 1e9)
+               if torch.cuda.is_available() else 0.0)
+    trial.set_user_attr("peak_mem_gb", peak_gb)
+    trial.set_user_attr("oom", False)
+    first_eval = (history_cb.eval_curve[0]["eval_loss"]
+                  if history_cb.eval_curve else float("inf"))
+    best_eval = min([p["eval_loss"] for p in history_cb.eval_curve],
+                    default=float("inf"))
+    best_step = next((p["step"] for p in history_cb.eval_curve
+                      if p["eval_loss"] == best_eval), 0)
+    stable = (best_eval < float("inf") and best_eval < first_eval
+              and best_eval == best_eval)  # NaN-safe
+    trial.set_user_attr("stable", bool(stable))
+    trial.set_user_attr("loss_drop_per_step",
+                        float((first_eval - best_eval) / max(best_step, 1))
+                        if stable else 0.0)
+    train_sps = (train_result.metrics.get("train_samples_per_second", None)
+                 if train_result is not None and train_result.metrics else None)
+    if train_sps is not None:
+        trial.set_user_attr("train_samples_per_second", float(train_sps))
 
     del trainer, model, optimizer, scheduler
     if torch.cuda.is_available():
@@ -236,6 +270,24 @@ def main():
                    "study": args.study_name, "init_from": args.init_from,
                    "user_attrs": study.best_trial.user_attrs}, f, indent=2)
     print(f"Wrote {best_path}. Retrain winner on full data with scripts/train_model.py.")
+    # Saturation summary: one row per trial for the max-stable-batch analysis.
+    summary_path = os.path.join(args.output_root, "batch_saturation.csv")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("trial,state,batch_size,grad_accum,eff_batch,lr,"
+                "val_loss,peak_mem_gb,stable,loss_drop_per_step,"
+                "train_samples_per_second,oom\n")
+        for t in study.trials:
+            a = t.user_attrs
+            p = t.params
+            eff = p.get("batch_size", 0) * p.get("grad_accum", 0)
+            f.write(f"{t.number},{t.state.name},{p.get('batch_size')},"
+                    f"{p.get('grad_accum')},{eff},{p.get('lr')},"
+                    f"{t.value if t.value is not None else ''},"
+                    f"{a.get('peak_mem_gb', '')},{a.get('stable', '')},"
+                    f"{a.get('loss_drop_per_step', '')},"
+                    f"{a.get('train_samples_per_second', '')},"
+                    f"{a.get('oom', '')}\n")
+    print(f"Wrote {summary_path} (batch vs memory vs stability).")
 
 
 if __name__ == "__main__":
