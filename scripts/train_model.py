@@ -95,17 +95,29 @@ class TabSampleCallback(TrainerCallback):
     """On every validation, decode the fixed sample songs with current weights.
 
     Uses the in-memory model (= the latest state at this step, equivalent to
-    the newest checkpoint once it is written) with deterministic greedy
-    decoding. Each eval writes::
+    the newest checkpoint once it is written). Decoding is beam search with a
+    no-repeat-ngram guard: pure greedy decoding of this small model collapses
+    into 1-2 token loops that never emit EOS (81% loop rate on 100 val
+    windows), which misrepresents what the model learned. Each eval writes::
 
-        <output_dir>/samples/step-<global_step>/<song>.{pred,ref,input}.txt
+        <output_dir>/samples/step-<global_step>/rules-<song>.{pred,ref,input}.txt
         <song>.pred.tex / <song>.pred.ascii + manifest.json
 
     Failures are logged, never fatal to training.
     """
 
     def __init__(self, tokenizer, samples, output_dir, run_name,
-                 max_input_tokens=512, max_new_tokens=512, log_path=None):
+                 max_input_tokens=512, max_new_tokens=512, log_path=None,
+                 beams=4, no_repeat_ngram=3):
+        self.tokenizer = tokenizer
+        self.samples = samples
+        self.output_dir = output_dir
+        self.run_name = run_name
+        self.max_input_tokens = max_input_tokens
+        self.max_new_tokens = max_new_tokens
+        self.log_path = log_path
+        self.beams = max(beams, 1)
+        self.no_repeat_ngram = no_repeat_ngram or None
         self.tokenizer = tokenizer
         self.samples = samples
         self.output_dir = output_dir
@@ -146,7 +158,8 @@ class TabSampleCallback(TrainerCallback):
                     with torch.no_grad():
                         out = model.generate(
                             **enc, max_new_tokens=self.max_new_tokens,
-                            do_sample=False, num_beams=1,
+                            do_sample=False, num_beams=self.beams,
+                            no_repeat_ngram_size=self.no_repeat_ngram,
                             early_stopping=True)
                     pred = self.tokenizer.decode(
                         out[0], skip_special_tokens=True).split()
@@ -272,6 +285,11 @@ def parse_args():
                    help="Fixed validation songs re-decoded to tab on every eval "
                         "(0 disables sample export).")
     p.add_argument("--sample-max-new-tokens", type=int, default=512)
+    p.add_argument("--sample-beams", type=int, default=4,
+                   help="Beam width for per-eval tab sample decoding "
+                        "(greedy=1 loops degenerately on this model).")
+    p.add_argument("--sample-no-repeat-ngram", type=int, default=3,
+                   help="No-repeat-ngram guard for sample decoding (0 disables).")
     p.add_argument("--val-files", default="dataset/processed/val_files.txt",
                    help="Split list used to pick the fixed sample songs.")
     return p.parse_args()
@@ -380,7 +398,9 @@ def train(args=None):
                 run_name=os.path.basename(os.path.normpath(output_dir)),
                 max_input_tokens=args.max_length,
                 max_new_tokens=args.sample_max_new_tokens,
-                log_path=args.log_file))
+                log_path=args.log_file,
+                beams=args.sample_beams,
+                no_repeat_ngram=args.sample_no_repeat_ngram))
         except Exception as e:  # noqa: BLE001 - sampling never blocks training
             print(f"WARNING: sample export disabled ({e})")
 
@@ -464,6 +484,8 @@ def train(args=None):
             "dropout": args.dropout,
             "save_steps": args.save_steps, "eval_steps": args.eval_steps,
             "sample_songs": args.sample_songs,
+            "sample_beams": args.sample_beams,
+            "sample_no_repeat_ngram": args.sample_no_repeat_ngram,
         },
         "mode": mode, "resume_checkpoint": resume_checkpoint,
         "status": "running",

@@ -23,21 +23,30 @@ def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--step", type=int, default=None,
                    help="Default: latest step folder.")
+    p.add_argument("--step-dir", default=None,
+                   help="Use this exact samples subfolder (e.g. a -redecode "
+                        "folder); overrides --step.")
     p.add_argument("--out-name", default="viewer.html")
     args = p.parse_args()
 
     samples = os.path.join(args.run_dir, "samples")
-    steps = sorted(d for d in os.listdir(samples)
-                   if re.fullmatch(r"step-\d+", d))
-    if not steps:
-        raise SystemExit(f"No step folders in {samples}")
-    if args.step is None:
-        step = steps[-1]
+    if args.step_dir:
+        step = args.step_dir
+        sdir = os.path.join(samples, step)
+        if not os.path.isdir(sdir):
+            raise SystemExit(f"Not a directory: {sdir}")
     else:
-        step = f"step-{args.step:08d}"
-        if step not in steps:
-            raise SystemExit(f"{step} not found; have: {steps}")
-    sdir = os.path.join(samples, step)
+        steps = sorted(d for d in os.listdir(samples)
+                       if re.fullmatch(r"step-\d+", d))
+        if not steps:
+            raise SystemExit(f"No step folders in {samples}")
+        if args.step is None:
+            step = steps[-1]
+        else:
+            step = f"step-{args.step:08d}"
+            if step not in steps:
+                raise SystemExit(f"{step} not found; have: {steps}")
+        sdir = os.path.join(samples, step)
     manifest = json.load(open(os.path.join(sdir, "manifest.json"),
                               encoding="utf-8"))
     eval_loss = (manifest.get("eval_metrics") or {}).get("eval_loss")
