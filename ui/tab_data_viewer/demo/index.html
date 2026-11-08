@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>open-fret tab_data_viewer demo</title>
+    <!-- MIDI player stack (player + piano-roll visualizer) -->
+    <script src="https://cdn.jsdelivr.net/combine/npm/tone@14.7.77,npm/@magenta/music@1.23.0/es6/core.js,npm/focus-visible@5,npm/html-midi-player@1.5.0"></script>
+    <!-- AlphaTab score renderer + player -->
+    <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/alphaTab.min.js"></script>
+    <script src="../dist/tab-data-viewer.umd.js"></script>
+  </head>
+  <body>
+    <h2>open-fret tab_data_viewer demo</h2>
+    <p>
+      Left: input MIDI (playable piano-roll). Right: predicted tab rendered by
+      AlphaTab (playable, click the score to seek). Bundle:
+      <code>bundle.example.json</code>
+    </p>
+    <div id="app"></div>
+    <script>
+      fetch("./bundle.example.json")
+        .then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then((bundle) => {
+          bundle._uid = "demo";
+          window.TabDataViewer.mount(document.getElementById("app"), bundle);
+        })
+        .catch((err) => {
+          document.getElementById("app").innerHTML =
+            "<p><b>Demo failed to load bundle:</b> " + String(err) + "</p>";
+          console.error(err);
+        });
+    </script>
+  </body>
+</html>
