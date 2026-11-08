@@ -52,23 +52,39 @@ def burnin_decay_factor(step, warmup_steps, decay_start_step, decay_factor):
     return float(decay_factor)
 
 
-def select_sample_songs(val_files_path, data_dir, k=5):
+def select_sample_songs(val_files_path, data_dir, k=5, tokenizer=None):
     """Pick K fixed validation windows from distinct songs for sample export.
 
     ``val_files.txt`` entries look like ``<song>.tex__t<track>__c<capo>__w<win>.json``;
     grouping by the song prefix gives musically distinct samples (not five
-    windows of the same song). Returns list of
+    windows of the same song). When ``tokenizer`` is given, windows whose MIDI
+    cannot be fingered by the anchored decoder are skipped so the fixed panel
+    always shows supported examples. Returns list of
     ``{name, midi_tokens, tab_tokens}`` dicts.
     """
     with open(val_files_path, encoding="utf-8") as f:
         names = [ln.strip() for ln in f if ln.strip()]
     if not names:
         raise ValueError(f"Empty split file: {val_files_path}")
-    seen, picked = set(), []
+    seen, picked, rejected = set(), [], 0
     for name in names:
         song = name.split("__t")[0]
         if song in seen:
             continue
+        path = os.path.join(data_dir, name)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        midi_tokens = data.get("midi") or data.get("input") or []
+        tab_tokens = data.get("tab") or data.get("target") or []
+        if not midi_tokens or not tab_tokens:
+            raise ValueError(f"Sample file {name} has empty midi/tab streams.")
+        if tokenizer is not None:
+            from open_fret.generation import AnchoredTemplate, UnsupportedInputError
+            try:
+                AnchoredTemplate(tokenizer, midi_tokens)
+            except UnsupportedInputError:
+                rejected += 1
+                continue
         seen.add(song)
         picked.append(name)
         if len(picked) >= k:
@@ -79,6 +95,8 @@ def select_sample_songs(val_files_path, data_dir, k=5):
                 picked.append(name)
             if len(picked) >= k:
                 break
+    if tokenizer is not None and rejected:
+        print(f"Sample selection skipped {rejected} unsupported source windows.")
     samples = []
     for name in picked[:k]:
         path = os.path.join(data_dir, name)
@@ -111,7 +129,7 @@ class TabSampleCallback(TrainerCallback):
 
     def __init__(self, tokenizer, samples, output_dir, run_name,
                  max_input_tokens=512, max_new_tokens=512, log_path=None,
-                 beams=4, no_repeat_ngram=3):
+                  beams=4, no_repeat_ngram=3, decoding_mode="anchored"):
         self.tokenizer = tokenizer
         self.samples = samples
         self.output_dir = output_dir
@@ -122,6 +140,7 @@ class TabSampleCallback(TrainerCallback):
         self.exported_steps = set()
         self.beams = max(beams, 1)
         self.no_repeat_ngram = no_repeat_ngram or None
+        self.decoding_mode = decoding_mode
         self.tokenizer = tokenizer
         self.samples = samples
         self.output_dir = output_dir
@@ -155,19 +174,12 @@ class TabSampleCallback(TrainerCallback):
                 try:
                     from open_fret.viewer import renderer_for_input
                     renderer = renderer_for_input(s["midi_tokens"], tempo=s.get("tempo", 120))
-                    enc = self.tokenizer(
-                        " ".join(s["midi_tokens"]),
-                        return_tensors="pt", truncation=True,
-                        max_length=self.max_input_tokens)
-                    enc = {k: v.to(model.device) for k, v in enc.items()}
-                    with torch.no_grad():
-                        out = model.generate(
-                            **enc, max_new_tokens=self.max_new_tokens,
-                            do_sample=False, num_beams=self.beams,
-                            no_repeat_ngram_size=self.no_repeat_ngram,
-                            early_stopping=True)
-                    pred = self.tokenizer.decode(
-                        out[0], skip_special_tokens=True).split()
+                    from open_fret.generation import generate_tab
+                    result = generate_tab(model, self.tokenizer, s["midi_tokens"],
+                        mode=self.decoding_mode, max_input_tokens=self.max_input_tokens,
+                        max_new_tokens=self.max_new_tokens, beams=self.beams,
+                        no_repeat_ngram=self.no_repeat_ngram)
+                    pred = result.tokens
                     base = "".join(
                         c if (c.isalnum() or c in "-_.") else "_"
                         for c in s["name"])[:120]
@@ -189,7 +201,8 @@ class TabSampleCallback(TrainerCallback):
                     manifest["songs"].append(
                         {"name": s["name"], "file": base,
                           "n_pred": len(pred),
-                          "tempo": s.get("tempo", 120),
+                           "tempo": s.get("tempo", 120),
+                           "generation": result.metadata,
                          "n_ref": len(s["tab_tokens"])})
                 except Exception as e:  # noqa: BLE001 - per-song isolation
                     self._log(f"Sample export failed for {s.get('name')}: {e}")
@@ -318,7 +331,8 @@ def parse_args():
                    help="Beam width for per-eval tab sample decoding "
                         "(greedy=1 loops degenerately on this model).")
     p.add_argument("--sample-no-repeat-ngram", type=int, default=3,
-                   help="No-repeat-ngram guard for sample decoding (0 disables).")
+                    help="Legacy-only no-repeat-ngram guard (0 disables).")
+    p.add_argument("--sample-decoding-mode", choices=["anchored", "legacy"], default="anchored")
     p.add_argument("--val-files", default="dataset/processed/val_files.txt",
                    help="Split list used to pick the fixed sample songs.")
     return p.parse_args()
@@ -440,7 +454,8 @@ def train(args=None):
     if args.sample_songs and int(args.sample_songs) > 0:
         try:
             samples = select_sample_songs(
-                args.val_files, args.data_dir, k=int(args.sample_songs))
+                args.val_files, args.data_dir, k=int(args.sample_songs),
+                tokenizer=tokenizer)
             print(f"Sample export: {len(samples)} fixed songs -> "
                   f"{output_dir}/samples/step-<step>/ "
                   f"({', '.join(s['name'][:40] for s in samples)})")
@@ -451,7 +466,8 @@ def train(args=None):
                 max_new_tokens=args.sample_max_new_tokens,
                 log_path=args.log_file,
                 beams=args.sample_beams,
-                no_repeat_ngram=args.sample_no_repeat_ngram))
+                no_repeat_ngram=args.sample_no_repeat_ngram,
+                decoding_mode=getattr(args, "sample_decoding_mode", "anchored")))
         except Exception as e:  # noqa: BLE001 - sampling never blocks training
             print(f"WARNING: sample export disabled ({e})")
 
@@ -543,6 +559,7 @@ def train(args=None):
             "sample_songs": args.sample_songs,
             "sample_beams": args.sample_beams,
             "sample_no_repeat_ngram": args.sample_no_repeat_ngram,
+            "sample_decoding_mode": getattr(args, "sample_decoding_mode", "anchored"),
         },
         "mode": mode, "resume_checkpoint": resume_checkpoint,
         "status": "running",

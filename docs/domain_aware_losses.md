@@ -43,7 +43,8 @@ python scripts/03_split.py --input-dir dataset/processed/loss-v2/individual \
   --output-dir dataset/processed/loss-v2
 python scripts/01.5_generate_vocab.py --input-dir dataset/processed/loss-v2/individual \
   --train-list dataset/processed/loss-v2/train_files.txt \
-  --output dataset/processed/loss-v2/unique_tokens.json
+  --output dataset/processed/loss-v2/unique_tokens.json \
+  --structural-lists dataset/processed/loss-v2/train_files.txt,dataset/processed/loss-v2/val_files.txt,dataset/processed/loss-v2/test_files.txt
 python scripts/02_tokenize.py --vocab dataset/processed/loss-v2/unique_tokens.json \
   --output-dir dataset/processed/loss-v2/tab_tokenizer
 python scripts/04_cache_dataset.py --data-dir dataset/processed/loss-v2/individual \
@@ -53,6 +54,26 @@ python scripts/04_cache_dataset.py --data-dir dataset/processed/loss-v2/individu
   --test-list dataset/processed/loss-v2/test_files.txt \
   --cache-dir dataset/processed/loss-v2/cache
 ```
+
+`--structural-lists` adds `CAPO_*`, `TUNING_*`, `NO_*`, `NF_*` and `TS_*` tokens
+from the listed splits. These are input conditioning/timing structure, not
+target fingerings, so this is not target leakage; `TAB_*` targets remain
+train-only. Without it, validation tuning prefixes and rare large time shifts
+were silently encoded as `[UNK]`. The cache builder now rejects any remaining
+out-of-vocabulary token instead of teaching on a substituted label.
+
+### Same-onset/same-string curation
+
+Some reference windows assign two different frets to one string inside a
+single attack group (overlapping voices or malformed source bars). Keeping them
+teaches the model an impossible chord. `open_fret.curation` identifies each
+affected group and the cache masks the **whole group** (its `TAB_*` labels
+become `-100`) while retaining the time shift and every unaffected onset.
+`cache_manifest.json` records per-split and total `scanned_windows`,
+`masked_windows` and `masked_notes`; use `--no-mask-conflicts` only to reproduce
+legacy caches for comparison. Masking is by onset, not by window, because a
+minority of onsets is affected even though many windows contain one.
+
 
 These commands rebuild timing; they do **not** resolve #5's training-only
 augmentation/duplicate audit. Review `_failures.log` for rejected syntax before
@@ -99,8 +120,23 @@ pitch match. Technique variants may share base pitch in this auxiliary term;
 ordinary CE still supervises the exact technique/fingering. This does not model
 the continuous pitch contour of a bend. It does not align free-running outputs.
 
-### Equivalence smoothing
+### Conditional pitch marginal
 
+`--conditional-pitch` subtracts the playable-TAB normalizer from the pitch
+marginal: it maximizes `P(correct pitch | any playable TAB token)` instead of
+`P(correct pitch)` over the full vocabulary. Without it, the auxiliary term also
+pressures the model to emit more TAB tokens, which distorts the TAB/TS/EOS
+balance and can inflate note counts. Exact CE still decides when notes occur.
+This option requires `--pitch-loss-alpha > 0` to have an effect.
+
+### Event-type marginal
+
+`--event-type-alpha 0.3` adds a macro-averaged marginal loss over three observed
+classes: melodic TAB note, time shift, and EOS. Each class is normalized by its
+own count before averaging, so EOS is not drowned by the much more frequent note
+and time tokens. Other structural/technique tokens retain exact CE supervision.
+
+### Equivalence smoothing
 At technique-free TAB targets with alternatives, keep probability `1-epsilon`
 on the reference and split `epsilon` uniformly across other **plain same-pitch**
 tokens present in the vocabulary. All other positions retain hard CE, including
@@ -148,6 +184,25 @@ python scripts/hpo_optuna.py --study-name pitch-v1 --output-root models/hpo-pitc
   --storage sqlite:///hpo-losses.db --cache-dir dataset/processed/loss-v2/cache \
   --tokenizer-dir dataset/processed/loss-v2/tab_tokenizer --pitch-loss-alpha 0.3
 ```
+
+## Independent loss/label audit
+
+`scripts/audit_losses.py` is read-only: it bincounts every label, scans bounded
+rows for same-onset/same-string conflicts, and recomputes CE, pitch marginal,
+conditional normalizer and the weighted objective position by position from the
+saved logits. It never reads held-out test music and never writes to the cache.
+
+```bash
+python scripts/audit_losses.py --cache <cache> --tokenizer <tokenizer> \
+  --checkpoint <checkpoint> --out <analysis>/loss_audit.json
+```
+
+On the previous loss-v3 cache and checkpoint 9891 this found 0 invalid labels,
+388 `[UNK]` validation labels, and 46.4%/39.4% of sampled train/validation
+windows containing at least one conflicting onset group. Independent
+recomputation matched the vectorized objective to `2.1e-7` (CE), `1.1e-7`
+(pitch with conditional normalizer) and `1.0e-7` (weighted loss), with finite
+gradients. Use `--skip-scan` to skip the expensive full-split counts.
 
 ## Verification and resource probe
 

@@ -100,16 +100,22 @@ python scripts/hpo_optuna.py --trials 20 --storage sqlite:///hpo.db
 
 ### 6. Experimental pitch-aware losses
 
-Training and Optuna support separate opt-in `--pitch-loss-alpha 0.3` and
-`--equivalence-smoothing 0.1` experiments; ordinary CE remains the default.
+Training and Optuna support separate opt-in `--pitch-loss-alpha 0.3`,
+`--equivalence-smoothing 0.1`, `--event-type-alpha 0.3` and
+`--conditional-pitch` experiments; ordinary CE remains the default.
 **Rebuild processed data/cache first:** inline AlphaTex durations previously
 failed to carry forward, and unsupported syntax was silently skipped. New loss
-experiments reject obsolete/unversioned caches. See
+experiments reject obsolete/unversioned caches. Rebuild the vocabulary with
+`--structural-lists` covering every split so unseen `TUNING_*`/`TS_*`
+conditioning never becomes `[UNK]`; the cache builder now fails loudly instead of
+silently substituting it. The cache also masks same-onset/same-string reference
+groups that cannot be fingered. See
 [the loss integration guide](docs/domain_aware_losses.md) for safe rebuild paths,
 formulas, matched CE controls, resume behavior and verification commands. These
 features have not yet demonstrated a model-quality gain.
 The user-requested [fresh combined-loss full run](docs/full_combined_run.md)
-uses CE weight 0.3, smoothing 0.1 and pitch weight 1, with automatic HTML history.
+uses CE weight 0.3, smoothing 0.1, pitch weight 1 and event-type weight 0.3,
+with automatic HTML history.
 
 ---
 

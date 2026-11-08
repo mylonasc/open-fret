@@ -49,7 +49,9 @@ def main():
                         "--output-dir", str(data), "--seed", "42"])
         stage("vocab", [py, "scripts/01.5_generate_vocab.py", "--input-dir", str(data / "individual"),
                         "--train-list", str(data / "train_files.txt"), "--output", str(data / "unique_tokens.json"),
-                        "--complete-fretboard"])
+                        "--complete-fretboard",
+                        "--structural-lists", ",".join(str(data / f) for f in
+                                                       ("train_files.txt", "val_files.txt", "test_files.txt"))])
         stage("tokenize", [py, "scripts/02_tokenize.py", "--vocab", str(data / "unique_tokens.json"),
                            "--output-dir", str(data / "tab_tokenizer")])
         stage("cache", [py, "scripts/04_cache_dataset.py", "--data-dir", str(data / "individual"),
@@ -71,8 +73,9 @@ def main():
                "--eval-steps", str(eval_steps), "--save-steps", str(2 * eval_steps),
                "--sample-songs", "5", "--sample-beams", "4", "--sample-no-repeat-ngram", "3",
                "--ce-loss-weight", "0.3", "--pitch-loss-alpha", "1", "--equivalence-smoothing", "0.1",
+               "--event-type-alpha", "0.3", "--conditional-pitch",
                "--optuna-storage", "sqlite:///hpo-losses.db",
-               "--optuna-study-name", "full-combined-ce03-pitch1-smooth01-v1"]
+               "--optuna-study-name", "full-curated-ce03-pitch1-smooth01-type03-v2"]
     (data / "full_run_plan.json").write_text(json.dumps({"fresh": True, "init_from": None,
         "resume": None, "processing": processing, "cache": cache, "command": command}, indent=2))
     if args.prepare_only:

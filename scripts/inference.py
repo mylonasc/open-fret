@@ -23,28 +23,16 @@ def midi_to_tokens(midi_path, target_res=480):
 
 
 def chunk_tokens(tokens, budget=DEFAULT_MAX_INPUT - 2):
-    """Split NO/NF/TS stream at TS boundaries to fit the input budget."""
-    chunks: list[list[str]] = []
-    cur: list[str] = []
-    for tok in tokens:
-        if tok.startswith("TS_") and len(cur) + 1 > budget and cur:
-            chunks.append(cur)
-            cur = []
-        cur.append(tok)
-        if len(cur) >= budget:
-            # Prefer to cut at next TS; for now cut here and continue.
-            chunks.append(cur)
-            cur = []
-    if cur:
-        chunks.append(cur)
-    return chunks
+    from open_fret.generation import chunk_complete_onsets
+    return chunk_complete_onsets(tokens, budget)
 
 
 def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
                   max_new_tokens=DEFAULT_MAX_OUTPUT, deterministic=True,
-                  capo=0, tuning=None):
+                   capo=0, tuning=None, decoding_mode="anchored", beams=4):
     from transformers import T5ForConditionalGeneration, AutoTokenizer
     from open_fret.midi_io import add_conditioning
+    from open_fret.generation import generate_tab
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
@@ -66,30 +54,18 @@ def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
         raise ValueError(f"No notes found in MIDI: {midi_path}")
     print(f"Input MIDI Tokens: {' '.join(midi_tokens[:30])}... ({len(midi_tokens)} total)")
 
-    chunks = chunk_tokens(midi_tokens, budget=max_input_tokens - 2)
+    chunks = chunk_tokens(midi_tokens, budget=min(max_input_tokens - 3, max_new_tokens - 1))
     if len(chunks) > 1:
         print(f"Long input: split into {len(chunks)} windows for full-song coverage.")
     decoded_all: list[str] = []
     for chunk in chunks:
-        full_input = " ".join(add_conditioning(chunk, capo=capo, tuning=tuning))
-        inputs = tokenizer(full_input, return_tensors="pt",
-                           truncation=True, max_length=max_input_tokens).to(device)
-        gen_kwargs = {"max_new_tokens": max_new_tokens, "early_stopping": True}
-        if deterministic:
-            gen_kwargs.update({"do_sample": False, "num_beams": 1})
-        else:
-            gen_kwargs.update({"do_sample": True, "top_p": 0.9, "temperature": 0.7})
-        with torch.no_grad():
-            outputs = model.generate(**inputs, **gen_kwargs)
-        decoded_all.extend(tokenizer.decode(outputs[0], skip_special_tokens=True).split())
-
-    try:
-        from post_process import neighbor_search
-        final_tokens = neighbor_search(decoded_all, midi_tokens)
-        return " ".join(final_tokens)
-    except Exception as e:  # noqa: BLE001
-        print(f"Post-processing failed ({e}); returning raw predictions.")
-        return " ".join(decoded_all)
+        result = generate_tab(model, tokenizer, add_conditioning(chunk, capo=capo, tuning=tuning),
+                              mode=decoding_mode, beams=beams,
+                              max_input_tokens=max_input_tokens, max_new_tokens=max_new_tokens,
+                              stochastic=not deterministic)
+        decoded_all.extend(result.tokens)
+    # Do not run order-only correction: it can destroy the timing guarantees.
+    return " ".join(decoded_all)
 
 
 def main():
@@ -105,6 +81,8 @@ def main():
                         help="Use sampling instead of deterministic decoding.")
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT)
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_OUTPUT)
+    parser.add_argument("--decoding-mode", choices=["anchored", "legacy"], default="anchored")
+    parser.add_argument("--beams", type=int, default=4)
     args = parser.parse_args()
     midi_path = args.midi or args.input
     if not midi_path:
@@ -113,7 +91,8 @@ def main():
     result = run_inference(midi_path, args.model,
                            max_input_tokens=args.max_input_tokens,
                            max_new_tokens=args.max_new_tokens,
-                           deterministic=not args.stochastic)
+                            deterministic=not args.stochastic,
+                            decoding_mode=args.decoding_mode, beams=args.beams)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(result)

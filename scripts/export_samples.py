@@ -45,20 +45,12 @@ def load_model(checkpoint, fp16=True):
 
 @torch.no_grad()
 def decode(tok, model, midi_tokens, max_new_tokens=512, beams=1,
-           no_repeat_ngram=0, repetition_penalty=1.0):
-    enc = tok(" ".join(midi_tokens), return_tensors="pt",
-              truncation=True, max_length=512)
-    enc = {k: v.to(model.device) for k, v in enc.items()}
-    out = model.generate(
-        **enc, max_new_tokens=max_new_tokens,
-        do_sample=False, num_beams=max(beams, 1),
-        no_repeat_ngram_size=no_repeat_ngram or None,
-        repetition_penalty=(repetition_penalty or None),
-        early_stopping=True)
-    ids = out[0].tolist()
-    stopped_eos = (ids and ids[-1] == tok.eos_token_id)
-    toks = tok.decode(out[0], skip_special_tokens=True).split()
-    return toks, stopped_eos
+           no_repeat_ngram=0, repetition_penalty=1.0, mode="anchored"):
+    from open_fret.generation import generate_tab
+    result = generate_tab(model, tok, midi_tokens, max_new_tokens=max_new_tokens,
+                          beams=beams, no_repeat_ngram=no_repeat_ngram,
+                          repetition_penalty=repetition_penalty, mode=mode)
+    return result.tokens, result.stopped_eos
 
 
 def is_loop(toks, max_unique=3):
@@ -96,6 +88,7 @@ def main():
     p.add_argument("--data-dir", default="dataset/processed/individual")
     p.add_argument("--sample-songs", type=int, default=5)
     p.add_argument("--beams", type=int, default=4)
+    p.add_argument("--decoding-mode", choices=["anchored", "legacy"], default="anchored")
     p.add_argument("--no-repeat-ngram", type=int, default=3)
     p.add_argument("--repetition-penalty", type=float, default=1.0)
     p.add_argument("--neighbor-search", action="store_true",
@@ -106,6 +99,8 @@ def main():
                         "(0 disables).")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
+    if args.neighbor_search and args.decoding_mode == "anchored":
+        p.error("Neighbor search would invalidate anchored guarantees; use legacy comparison mode")
 
     tok, model = load_model(args.checkpoint)
     renderer = TabRenderer()
@@ -117,8 +112,8 @@ def main():
     songs = select_sample_songs(args.val_files, args.data_dir,
                                 k=args.sample_songs)
     manifest = {"checkpoint": args.checkpoint,
-                "decoding": {"beams": args.beams,
-                             "no_repeat_ngram": args.no_repeat_ngram,
+                 "decoding": {"beams": args.beams, "mode": args.decoding_mode,
+                              "no_repeat_ngram": args.no_repeat_ngram if args.decoding_mode == "legacy" else 0,
                              "repetition_penalty": args.repetition_penalty,
                              "neighbor_search": bool(correct)},
                 "songs": []}
@@ -126,17 +121,19 @@ def main():
         pred, stopped = decode(tok, model, s["midi_tokens"],
                                beams=args.beams,
                                no_repeat_ngram=args.no_repeat_ngram,
-                               repetition_penalty=args.repetition_penalty)
+                                repetition_penalty=args.repetition_penalty, mode=args.decoding_mode)
         if correct is not None:
             try:
                 pred = correct(pred, s["midi_tokens"])
             except Exception as e:  # noqa: BLE001
                 print(f"neighbor_search failed for {s['name']}: {e}")
+        from open_fret.viewer import renderer_for_input
+        renderer = renderer_for_input(s["midi_tokens"], s.get("tempo", 120))
         base = write_song(args.out_dir, renderer, s["name"],
                           s["midi_tokens"], s["tab_tokens"], pred)
         manifest["songs"].append(
             {"name": s["name"], "file": base, "n_pred": len(pred),
-             "n_ref": len(s["tab_tokens"]), "stopped_eos": stopped,
+              "n_ref": len(s["tab_tokens"]), "stopped_eos": stopped, "tempo": s.get("tempo", 120),
              "loop": is_loop(pred)})
         print(f"{s['name'][:50]:50s} n_pred={len(pred):4d} "
               f"eos={stopped!s:5s} loop={is_loop(pred)!s:5s}")
@@ -160,7 +157,7 @@ def main():
                                       "no_repeat_ngram": args.no_repeat_ngram,
                                       "repetition_penalty":
                                       args.repetition_penalty})):
-                pred, stopped = decode(tok, model, dd["midi"], **kw)
+                pred, stopped = decode(tok, model, dd["midi"], mode="legacy", **kw)
                 st = stats[key]
                 st["n"] += 1
                 st["exact"] += (pred == ref)

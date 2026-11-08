@@ -20,13 +20,19 @@ def add_loss_arguments(parser):
     parser.add_argument("--equivalence-smoothing", type=float, default=0.0,
                        help="Opt-in probability mass for same-pitch plain TAB alternatives (e.g. 0.1).")
     parser.add_argument("--loss-max-fret", type=int, default=24,
-                        help="Maximum valid fret for domain-aware supervision.")
+                         help="Maximum valid fret for domain-aware supervision.")
+    parser.add_argument("--event-type-alpha", type=float, default=0.0,
+                        help="Weight of class-balanced TAB/TS/EOS marginal supervision.")
+    parser.add_argument("--conditional-pitch", action="store_true",
+                        help="Normalize auxiliary pitch probability over playable TAB tokens only.")
 
 
 def loss_config_from_args(args):
     return LossConfig(ce_weight=args.ce_loss_weight, pitch_alpha=args.pitch_loss_alpha,
                       smoothing=args.equivalence_smoothing,
-                      max_fret=args.loss_max_fret)
+                       max_fret=args.loss_max_fret,
+                       type_alpha=getattr(args, 'event_type_alpha', 0.0),
+                       conditional_pitch=getattr(args, 'conditional_pitch', False))
 
 
 def validate_loss_cache(cache_dir, config):
@@ -62,7 +68,8 @@ class TabLossTrainer(Trainer):
         super().__init__(*args, **kwargs)
         if self.tab_loss_config.enabled and self.label_smoother is not None:
             raise ValueError("Do not combine HF label smoothing with equivalence supervision")
-        self.tab_objective = (TabLoss(self.token_metadata, self.tab_loss_config).to(self.args.device)
+        self.tab_objective = (TabLoss(self.token_metadata, self.tab_loss_config,
+                                     eos_token_id=loss_tokenizer.eos_token_id).to(self.args.device)
                               if self.tab_loss_config.enabled else None)
         self.model.config.open_fret_loss = self.tab_loss_config.to_dict()
         self.model.config.open_fret_token_metadata = self.token_metadata.manifest()
@@ -77,6 +84,8 @@ class TabLossTrainer(Trainer):
             saved = json.load(f)
         saved_loss = dict(saved.get("open_fret_loss", LossConfig().to_dict()))
         saved_loss.setdefault("ce_weight", 1.0)
+        saved_loss.setdefault("type_alpha", 0.0)
+        saved_loss.setdefault("conditional_pitch", False)
         saved_loss["version"] = 2
         if saved_loss != self.tab_loss_config.to_dict():
             raise ValueError("Checkpoint loss differs from requested loss; use identical flags for resume, "
@@ -109,6 +118,7 @@ class TabLossTrainer(Trainer):
         outputs["loss"] = loss
         bucket = self._loss_sums["train" if model.training else "eval"]
         terms = {"ce": parts["ce"] * parts["tokens"],
+                 "type": parts["type"] * parts["tokens"],
                  "pitch": parts["pitch"] * parts["notes"],
                  "smoothing_delta": parts["smoothing_delta"] * parts["tokens"],
                  "tokens": parts["tokens"], "notes": parts["notes"],
@@ -126,6 +136,9 @@ class TabLossTrainer(Trainer):
             logs.update({
                 prefix + "ce_loss": values["ce"] / max(values["tokens"], 1),
                 prefix + "pitch_loss": values["pitch"] / max(values["notes"], 1),
+                prefix + "event_type_loss": values["type"] / max(values["tokens"], 1),
+                prefix + "weighted_event_type_loss": self.tab_loss_config.type_alpha * values["type"] / max(values["tokens"], 1),
+                prefix + "event_type_alpha": self.tab_loss_config.type_alpha,
                 prefix + "equivalence_smoothing_delta": values["smoothing_delta"] / max(values["tokens"], 1),
                 prefix + "note_positions": values["notes"],
                 prefix + "smoothed_note_positions": values["smoothed_notes"],

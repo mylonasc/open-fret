@@ -48,6 +48,49 @@ def test_metadata_concert_pitch_custom_tuning_capo_and_hash():
     assert META.manifest()["sha256"] != TokenMetadata(tuple(reversed(TOKENS))).manifest()["sha256"]
 
 
+def test_conditional_pitch_matches_playable_normalization_and_ignores_structural_mass():
+    torch.manual_seed(9)
+    scores = torch.randn(1, 1, len(TOKENS), requires_grad=True)
+    config = LossConfig(pitch_alpha=1, conditional_pitch=True)
+    _, parts = objective(config, scores, ['TAB_1_0'])
+    tuning = (64, 59, 55, 50, 45, 40)
+    playable = [i for i in range(len(TOKENS)) if META.pitch(i, tuning) is not None]
+    correct = [i for i in playable if META.pitch(i, tuning) == 64]
+    expected = scores[0, 0, playable].logsumexp(0) - scores[0, 0, correct].logsumexp(0)
+    assert torch.allclose(parts['pitch'], expected)
+    changed = scores.detach().clone()
+    changed[..., IDS['TS_480']] += 20
+    _, after = objective(config, changed, ['TAB_1_0'])
+    assert torch.allclose(parts['pitch'], after['pitch'], atol=2e-6)
+    grad = torch.autograd.grad(expected, scores)[0]
+    assert grad[..., IDS['TS_480']] == 0
+
+
+def test_event_type_loss_is_macro_balanced_and_pushes_time_and_eos():
+    scores = torch.zeros(1, 5, len(TOKENS), requires_grad=True)
+    targets = ['TAB_1_0', 'TAB_2_5', 'TAB_3_9', 'TS_480', '[EOS]']
+    loss, parts = objective(LossConfig(type_alpha=1), scores, targets)
+    logp = scores.log_softmax(-1)
+    tabs = [i for i in range(len(TOKENS)) if META.note(i)]
+    expected = -(logp[0, :3, tabs].logsumexp(-1).mean()
+                 + logp[0, 3, IDS['TS_480']] + logp[0, 4, IDS['[EOS]']]) / 3
+    assert torch.allclose(parts['type'], expected)
+    assert torch.allclose(loss, parts['ce'] + expected)
+    loss.backward()
+    assert scores.grad[0, 3, IDS['TS_480']] < 0
+    assert scores.grad[0, 4, IDS['[EOS]']] < 0
+    assert torch.isfinite(scores.grad).all()
+
+
+def test_new_losses_all_padding_have_finite_zero_gradient():
+    scores = torch.randn(1, 2, len(TOKENS), requires_grad=True)
+    loss, parts = objective(LossConfig(type_alpha=1, pitch_alpha=1, conditional_pitch=True),
+                            scores, [-100, -100])
+    assert loss == 0
+    loss.backward()
+    assert torch.equal(scores.grad, torch.zeros_like(scores))
+
+
 @pytest.mark.parametrize("config", [LossConfig(), LossConfig(pitch_alpha=0), LossConfig(smoothing=0)])
 def test_disabled_matches_ce_value_and_gradient(config):
     torch.manual_seed(0)

@@ -23,6 +23,7 @@ TOKENS = ("[PAD]", "[UNK]", "[BOS]", "[EOS]", "CAPO_0", "CAPO_2",
 
 
 class Tokenizer:
+    eos_token_id = 3
     def get_vocab(self):
         return {token: i for i, token in enumerate(TOKENS)}
 
@@ -57,7 +58,9 @@ def small_cpu_thread_pool():
 
 
 @pytest.mark.parametrize("config", [LossConfig(pitch_alpha=0.3), LossConfig(smoothing=0.1),
-                                   LossConfig(ce_weight=0.3, pitch_alpha=1, smoothing=0.1)])
+                                    LossConfig(ce_weight=0.3, pitch_alpha=1, smoothing=0.1),
+                                    LossConfig(pitch_alpha=1, smoothing=0.1, type_alpha=0.3,
+                                               conditional_pitch=True)])
 def test_real_training_evaluation_reload_and_resume(tmp_path, config):
     trainer = TabLossTrainer(model=model(), args=arguments(tmp_path, 1),
                              train_dataset=examples(), eval_dataset=examples(),
@@ -69,7 +72,11 @@ def test_real_training_evaluation_reload_and_resume(tmp_path, config):
     assert all(torch.isfinite(torch.tensor(v)) for v in evaluation.values() if isinstance(v, float))
     assert "eval_ce_loss" in evaluation
     assert evaluation["eval_note_positions"] == 8
-    assert evaluation["eval_pitch_loss"] > 0 if config.pitch_alpha else evaluation["eval_smoothed_note_positions"] == 8
+    if config.conditional_pitch:
+        # All three playable TAB tokens in this fixture have pitch 64.
+        assert abs(evaluation["eval_pitch_loss"]) < 1e-6
+    else:
+        assert evaluation["eval_pitch_loss"] > 0 if config.pitch_alpha else evaluation["eval_smoothed_note_positions"] == 8
     checkpoint = tmp_path / "checkpoint-1"
     saved = json.loads((checkpoint / "config.json").read_text())
     assert saved["open_fret_loss"] == config.to_dict()

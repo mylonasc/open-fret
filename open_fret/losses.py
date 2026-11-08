@@ -22,6 +22,8 @@ class LossConfig:
     pitch_alpha: float = 0.0
     smoothing: float = 0.0
     max_fret: int = 24
+    type_alpha: float = 0.0
+    conditional_pitch: bool = False
 
     def __post_init__(self):
         if not math.isfinite(self.ce_weight) or self.ce_weight <= 0:
@@ -32,10 +34,12 @@ class LossConfig:
             raise ValueError("smoothing must be finite and in [0, 1)")
         if not 0 <= self.max_fret <= 127:
             raise ValueError("max_fret must be between 0 and 127")
+        if not math.isfinite(self.type_alpha) or self.type_alpha < 0:
+            raise ValueError("type_alpha must be finite and nonnegative")
 
     @property
     def enabled(self):
-        return bool(self.ce_weight != 1.0 or self.pitch_alpha or self.smoothing)
+        return bool(self.ce_weight != 1.0 or self.pitch_alpha or self.smoothing or self.type_alpha or self.conditional_pitch)
 
     def to_dict(self):
         return {"version": 2, **asdict(self)}
@@ -48,7 +52,7 @@ class TabLoss(nn.Module):
     Smoothing is limited to technique-free TAB targets and alternatives.
     """
 
-    def __init__(self, metadata: TokenMetadata, config: LossConfig):
+    def __init__(self, metadata: TokenMetadata, config: LossConfig, eos_token_id=None):
         super().__init__()
         if metadata.max_fret != config.max_fret:
             raise ValueError("Loss configuration and metadata fret limits differ")
@@ -69,6 +73,13 @@ class TabLoss(nn.Module):
         note_fret = torch.zeros(vocab_size, dtype=torch.long)
         plain = torch.zeros(vocab_size, dtype=torch.bool)
         is_tab = torch.tensor([t.startswith("TAB_") for t in metadata.tokens])
+        if eos_token_id is None:
+            eos_token_id = next((i for i, t in enumerate(metadata.tokens) if t in ("[EOS]", "</s>")), None)
+        if config.type_alpha and eos_token_id is None:
+            raise ValueError("Event-type supervision requires an explicit EOS token ID")
+        event_type = torch.tensor([0 if metadata.note(i) else 1 if t.startswith("TS_")
+                                   else 2 if i == eos_token_id else 3
+                                   for i, t in enumerate(metadata.tokens)])
         candidates = {}
         for i, token in enumerate(metadata.tokens):
             if tunings[i] is not None:
@@ -98,6 +109,7 @@ class TabLoss(nn.Module):
             "note_string": note_string, "note_fret": note_fret,
             "plain": plain, "is_tab": is_tab,
             "candidates": candidate_table, "plain_candidates": plain_table,
+            "event_type": event_type,
         }.items():
             self.register_buffer(name, table, persistent=False)
 
@@ -118,11 +130,25 @@ class TabLoss(nn.Module):
             ce_loss = (F.cross_entropy(logits.flatten(0, 1).float(), labels.flatten(),
                                        ignore_index=-100) if count else zero)
         metrics = {"ce": ce_loss.detach(), "pitch": zero.detach(),
+                    "type": zero.detach(),
                    "smoothing_delta": zero.detach(), "tokens": count.detach(),
                    "notes": zero.detach(), "smoothed_notes": zero.detach()}
         if not self.config.enabled:
             return ce_loss, metrics
         safe_labels = labels.masked_fill(~active, 0)
+        type_loss = zero
+        if self.config.type_alpha and count:
+            class_losses = []
+            # Macro-average observed event classes so rare EOS cannot be drowned
+            # by the many note/time tokens. OTHER retains exact CE supervision.
+            for kind in range(3):
+                ids = self.event_type.eq(kind)
+                mask = active & self.event_type[safe_labels].eq(kind)
+                if mask.any():
+                    class_losses.append(-log_probs[mask][:, ids].logsumexp(-1).mean())
+            if class_losses:
+                type_loss = torch.stack(class_losses).mean()
+            metrics['type'] = type_loss.detach()
         note_mask = active & self.note_string[safe_labels].ge(0)
         if (active & self.is_tab[safe_labels] & ~note_mask).any():
             raise ValueError("Invalid TAB supervision for configured string/fret limits")
@@ -151,7 +177,7 @@ class TabLoss(nn.Module):
         positions = note_mask.nonzero()
         metrics["notes"] = note_mask.sum().detach()
         if not len(positions):
-            return self.config.ce_weight * ce_loss, metrics
+            return self.config.ce_weight * ce_loss + self.config.type_alpha * type_loss, metrics
         pitch_sum, smooth_sum, smoothed_count = zero, zero, zero.detach()
         batch, time = positions.unbind(dim=1)
         target = labels[batch, time]
@@ -172,6 +198,17 @@ class TabLoss(nn.Module):
             equivalent = log_probs[batch[:, None], time[:, None], ids.clamp_min(0)]
             equivalent = equivalent.masked_fill(~mask, -torch.inf)
             pitch_sum = -equivalent.logsumexp(-1).sum()
+            if self.config.conditional_pitch:
+                # P(correct pitch | playable TAB), removing the auxiliary
+                # pressure to emit TAB instead of TS/EOS. Exact CE and optional
+                # event-type loss still supervise when a note should occur.
+                all_ids = self.candidates.flatten()
+                frets_all = torch.arange(self.config.max_fret + 1, device=logits.device)[None, :, None]
+                pitches = tuning[batch, :, None, None] + capo[batch, None, None, None] + frets_all
+                playable = (tuning[batch, :, None, None].ge(0) & pitches.ge(0) & pitches.le(127))
+                playable = playable.expand(-1, -1, -1, self.candidates.shape[-1]).flatten(1) & all_ids.ge(0)
+                valid_logp = log_probs[batch[:, None], time[:, None], all_ids.clamp_min(0)]
+                pitch_sum = pitch_sum + valid_logp.masked_fill(~playable, -torch.inf).logsumexp(-1).sum()
         if self.config.smoothing:
             ids = self.plain_candidates[string_ids, frets]
             mask = valid & ids.ge(0) & ids.ne(target[:, None]) & self.plain[target, None]
@@ -185,7 +222,8 @@ class TabLoss(nn.Module):
             smoothed_count = eligible.sum()
         pitch_mean = pitch_sum / metrics["notes"].clamp_min(1)
         smooth_delta = self.config.smoothing * smooth_sum / count.clamp_min(1)
-        loss = self.config.ce_weight * (ce_loss + smooth_delta) + self.config.pitch_alpha * pitch_mean
+        loss = (self.config.ce_weight * (ce_loss + smooth_delta)
+                + self.config.pitch_alpha * pitch_mean + self.config.type_alpha * type_loss)
         metrics.update(pitch=pitch_mean.detach(), smoothing_delta=smooth_delta.detach(),
                        smoothed_notes=smoothed_count.detach())
         return loss, metrics

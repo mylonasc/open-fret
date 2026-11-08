@@ -67,19 +67,19 @@ class AnchoredTemplate:
         self.tuning = TokenMetadata.tuning(self.tokens[1])
         if self.capo is None or self.tuning is None:
             raise UnsupportedInputError("Expected CAPO then concert-MIDI TUNING prefix")
-        if max_fret < 0:
-            raise UnsupportedInputError("max_fret must be nonnegative")
+        if not 0 <= max_fret <= 127:
+            raise UnsupportedInputError("max_fret must be between 0 and 127")
         self.note_strings = {}
         candidates = {}
-        for string, open_pitch in enumerate(self.tuning, 1):
-            if open_pitch < 0:
+        metadata = TokenMetadata.from_tokenizer(tokenizer, max_fret)
+        for token_id in range(len(metadata.tokens)):
+            note = metadata.note(token_id)
+            if note is None:
                 continue
-            for fret in range(max_fret + 1):
-                token_id = self.vocab.get(f"TAB_{string}_{fret}")
-                if token_id is not None:
-                    pitch = open_pitch + self.capo + fret
-                    candidates.setdefault(pitch, []).append(token_id)
-                    self.note_strings[token_id] = string
+            pitch = metadata.pitch(token_id, self.tuning, self.capo)
+            if pitch is not None:
+                candidates.setdefault(pitch, []).append(token_id)
+                self.note_strings[token_id] = note[0]
         slots, groups, tick = [], {}, 0
         for token in self.tokens[2:]:
             try:
@@ -109,7 +109,7 @@ class AnchoredTemplate:
         self.slots = tuple(slots) + (Slot("eos", tick, (self.eos_id,)),)
         self.note_domains = {}
         for indices in groups.values():
-            masks = tuple(sum(1 << (self.note_strings[i] - 1) for i in self.slots[index].ids)
+            masks = tuple(sum(1 << (s - 1) for s in {self.note_strings[i] for i in self.slots[index].ids})
                           for index in indices)
             if not _can_assign(masks):
                 raise UnplayableInputError(f"No distinct-string assignment for chord at tick {self.slots[indices[0]].tick}")
@@ -148,8 +148,14 @@ def prepare_encoder(tokenizer, tokens, max_input_tokens=512):
         tokens.pop()
     if tokenizer.eos_token in tokens:
         raise UnsupportedInputError("EOS is only legal at the end of input")
+    vocab = tokenizer.get_vocab()
+    unknown = [t for t in tokens if t not in vocab or t in tokenizer.all_special_tokens]
+    if unknown:
+        raise UnsupportedInputError(f"Unknown or special input tokens: {unknown[:3]}")
     encoded = tokenizer(" ".join(tokens + [tokenizer.eos_token]),
                         add_special_tokens=False, return_tensors="pt")
+    if encoded["input_ids"][0].tolist() != [vocab[t] for t in tokens + [tokenizer.eos_token]]:
+        raise UnsupportedInputError("Tokenizer must encode each domain token as exactly one ID")
     if encoded["input_ids"].shape[1] > max_input_tokens:
         raise UnsupportedInputError("Input exceeds budget including EOS; use complete-onset chunking")
     return encoded
