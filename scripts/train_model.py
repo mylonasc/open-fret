@@ -74,7 +74,11 @@ def parse_args():
     p.add_argument("--output-dir", default="models/tiny-tab-v1")
     p.add_argument("--log-file", default="train_log.txt")
     p.add_argument("--epochs", type=int, default=60)
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, default=64,
+                   help="Per-device batch size. 64 fits 8GB VRAM for this tiny "
+                        "model; 96+ better saturates a 24GB card (see benchmark).")
+    p.add_argument("--workers", type=int, default=2,
+                   help="DataLoader workers (dataloader_num_workers).")
     p.add_argument("--grad-accum", type=int, default=2)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=42)
@@ -154,6 +158,8 @@ def train(args=None):
         logging_steps=50,
         fp16=torch.cuda.is_available(),
         report_to="none",
+        dataloader_num_workers=args.workers,
+        dataloader_pin_memory=True,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
