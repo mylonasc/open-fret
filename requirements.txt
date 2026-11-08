@@ -12,4 +12,6 @@ transformers
 accelerate
 evaluate
 scikit-learn
+optuna
+pytest
 PyGuitarPro==0.6

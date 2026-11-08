@@ -33,34 +33,50 @@ pip install -r requirements.txt
 
 ### 2. Dataset Preparation
 
-Open-Fret uses the **DadaGP** and **SynthTab** datasets. To prepare your data, follow the sequential scripts in the `scripts/` directory:
+Open-Fret uses the **vldsavelyev/guitar_tab** AlphaTex corpus. The modular
+preprocessing lives in `open_fret/` (`alphatex`, `sequences`, `splits`,
+`postprocess`, `render`, `training`); `scripts/` are thin CLI wrappers.
 
 ```bash
+# 0. Quick fixture check (no download, no GPU)
+/tmp/opencode/venv/bin/python scripts/smoke_test.py
+/tmp/opencode/venv/bin/python -m pytest tests/ -q
+
 # 1. Download the dataset (if applicable/accessible)
 python scripts/00_download.py
 
-# 2. Process MIDI/GP files into raw token streams
+# 2. Process AlphaTex into aligned MIDI/tab windows
 python scripts/01_process.py
 
-# 3. Generate the SentencePiece vocabulary
-python scripts/01.5_generate_vocab.py
-
-# 4. Tokenize the sequences for the model
-python scripts/02_tokenize.py
-
-# 5. Split data into train, validation, and test sets
+# 3. Split by source song (no leakage across train/val/test)
 python scripts/03_split.py
 
-# 6. Convert predicted tokens back to readable tablature (.txt)
-python scripts/tokens_to_tab.py --input path/to/predictions.tokens
+# 4. Generate the vocabulary (prefer training-only for final runs)
+python scripts/01.5_generate_vocab.py --train-list dataset/processed/train_files.txt
+
+# 5. Tokenize the sequences for the model
+python scripts/02_tokenize.py
+
+# 6. Cache aligned train/validation/test tensors
+python scripts/04_cache_dataset.py
 ```
+
+> Vocab built on all windows leaks held-out tokens; use `--train-list` for
+> final runs.
 
 ### 3. Training
 
-Train the `T5-Tiny-Tab` model using your prepared data:
+Train the `T5-Tiny-Tab` model from scratch (fresh by default):
 
 ```bash
+# Fresh run (default)
 python scripts/train_model.py
+
+# Resume latest checkpoint in --output-dir, or fail visibly if none
+python scripts/train_model.py --resume
+
+# Resume an explicit checkpoint
+python scripts/train_model.py --resume models/tiny-tab-v1/checkpoint-XXXX
 ```
 
 *Note: Optimized to train on GPUs with as little as 8GB VRAM using the Adafactor optimizer.*
@@ -70,7 +86,15 @@ python scripts/train_model.py
 Convert your MIDI files to tokens, and then to tablature:
 
 ```bash
-python scripts/inference.py --input path/to/your/song.mid
+python scripts/inference.py --midi path/to/your/song.mid
+# Optional: --out predictions.tokens --stochastic for sampling
+```
+
+### 5. Hyperparameter tuning (Optuna)
+
+```bash
+python scripts/hpo_optuna.py --trials 20 --storage sqlite:///hpo.db
+# Best config -> models/hpo/best_config.json; retrain via scripts/train_model.py
 ```
 
 ---

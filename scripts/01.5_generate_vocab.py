@@ -1,41 +1,53 @@
-import os
+"""Build the unique-token list.
+
+By default scans all windows, but for leakage-free runs pass
+``--train-list dataset/processed/train_files.txt`` to build the vocabulary
+from training windows only (requires splitting before vocab generation).
+"""
+import argparse
 import json
+import os
 from tqdm import tqdm
 
-def generate_vocab():
-    input_dir = "dataset/processed/individual"
-    output_file = "dataset/processed/unique_tokens.json"
-    
-    if not os.path.exists(input_dir):
-        print(f"Directory {input_dir} not found. Run 01_process.py first.")
-        return
 
-    files = [f for f in os.listdir(input_dir) if f.endswith('.json')]
-    print(f"Collecting unique tokens from {len(files)} files...")
-    
+def generate_vocab(input_dir="dataset/processed/individual",
+                   output_file="dataset/processed/unique_tokens.json",
+                   train_list=None):
+    if not os.path.exists(input_dir):
+        raise FileNotFoundError(f"Directory {input_dir} not found. Run 01_process.py first.")
+    if train_list:
+        with open(train_list, encoding="utf-8") as f:
+            files = [ln.strip() for ln in f if ln.strip()]
+        print(f"Building training-only vocab from {len(files)} files (leakage-safe).")
+    else:
+        files = [f for f in os.listdir(input_dir) if f.endswith(".json")]
+        print(f"Collecting unique tokens from {len(files)} files...")
+        print("WARNING: vocab includes validation/test tokens. "
+              "For final runs, use --train-list train_files.txt after splitting.")
     unique_tokens = set()
-    
     for filename in tqdm(files, desc="Scanning files"):
         file_path = os.path.join(input_dir, filename)
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Collect MIDI tokens
-                if 'midi' in data:
-                    unique_tokens.update(data['midi'])
-                # Collect Tab tokens
-                if 'tab' in data:
-                    unique_tokens.update(data['tab'])
-        except Exception as e:
+            if "midi" in data:
+                unique_tokens.update(data["midi"])
+            if "tab" in data:
+                unique_tokens.update(data["tab"])
+        except Exception as e:  # noqa: BLE001
+            print(f"Skipping {filename}: {e}")
             continue
-
-    # Sort tokens for consistency
-    sorted_tokens = sorted(list(unique_tokens))
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
+    sorted_tokens = sorted(unique_tokens)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(sorted_tokens, f)
-    
     print(f"Done! Saved {len(sorted_tokens)} unique tokens to {output_file}")
 
+
 if __name__ == "__main__":
-    generate_vocab()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input-dir", default="dataset/processed/individual")
+    ap.add_argument("--output", default="dataset/processed/unique_tokens.json")
+    ap.add_argument("--train-list", default=None)
+    a = ap.parse_args()
+    generate_vocab(a.input_dir, a.output, a.train_list)

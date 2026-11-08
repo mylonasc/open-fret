@@ -1,47 +1,56 @@
+"""First working training loop (Issues #3, #4, #5, #10).
+
+- Fresh runs work: ``--resume`` is opt-in; without it training starts from
+  scratch. ``--resume`` without a checkpoint starts fresh instead of crashing.
+- Aligned windows + song-group splits are consumed here (produced upstream).
+- No silent data substitution; missing artifacts fail with actionable errors.
+"""
+import argparse
+import json
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import torch
 from transformers import (
     T5ForConditionalGeneration,
     AutoTokenizer,
     Trainer,
     TrainingArguments,
-    Adafactor,
-    EarlyStoppingCallback
+    EarlyStoppingCallback,
+    TrainerCallback,
+    set_seed,
 )
-import sys
-# Ensure standard imports work when running as script
-try:
-    from config import get_tiny_tab_config
-    from dataloader import TabDataset
-except ImportError:
-    # If running from root as 'python scripts/train_model.py'
-    # we need to add local dir
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from config import get_tiny_tab_config
-    from dataloader import TabDataset
 
-import multiprocessing
-from transformers import TrainerCallback
+from datasets import load_from_disk
+
+from config import get_tiny_tab_config
+from dataloader import TabDataset
+
+try:
+    from open_fret.training import resolve_resume_checkpoint
+except ImportError:  # when run as scripts/train_model.py without root on path
+    from open_fret.training import resolve_resume_checkpoint
+
 
 class TrainLoggerCallback(TrainerCallback):
     def __init__(self, log_path):
         self.log_path = log_path
         with open(self.log_path, "a") as f:
-            f.write("\n" + "="*40 + "\n")
-            f.write("RESUMING LOG SESSION\n")
-            f.write("="*40 + "\n")
+            f.write("\n" + "=" * 40 + "\n")
+            f.write("LOG SESSION\n")
+            f.write("=" * 40 + "\n")
 
     def on_epoch_end(self, args, state, control, **kwargs):
-        # Professional summary at end of each epoch
-        epoch = round(state.epoch)
+        epoch = round(state.epoch or 0)
         with open(self.log_path, "a") as f:
             f.write(f"\n--- Epoch {epoch} Summary ---\n")
             if state.log_history:
-                # Find latest evaluation metrics
                 eval_metrics = [h for h in state.log_history if "eval_loss" in h]
                 if eval_metrics:
-                    latest_eval = eval_metrics[-1]
-                    f.write(f"Validation Loss: {latest_eval['eval_loss']:.4f}\n")
+                    f.write(f"Validation Loss: {eval_metrics[-1]['eval_loss']:.4f}\n")
             f.write("-" * 20 + "\n")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
@@ -56,49 +65,76 @@ class TrainLoggerCallback(TrainerCallback):
                     log_str += f"LR: {logs['learning_rate']:.2e} | "
                 f.write(log_str + "\n")
 
-from datasets import load_from_disk
 
-def train():
-    TOKENIZER_DIR = "dataset/processed/tab_tokenizer"
-    CACHE_DIR = "dataset/processed/cached_dataset"
-    OUTPUT_DIR = "models/tiny-tab-v1"
-    LOG_FILE = "train_log.txt"
+def parse_args():
+    p = argparse.ArgumentParser(description="Train tiny T5 tab model.")
+    p.add_argument("--tokenizer-dir", default="dataset/processed/tab_tokenizer")
+    p.add_argument("--cache-dir", default="dataset/processed/cached_dataset")
+    p.add_argument("--data-dir", default="dataset/processed/individual")
+    p.add_argument("--output-dir", default="models/tiny-tab-v1")
+    p.add_argument("--log-file", default="train_log.txt")
+    p.add_argument("--epochs", type=int, default=60)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--grad-accum", type=int, default=2)
+    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume", nargs="?", const=True, default=None,
+                   help="Resume from latest checkpoint in --output-dir, "
+                        "or from PATH if a path is given. Omit for fresh training.")
+    p.add_argument("--max-length", type=int, default=512)
+    return p.parse_args()
 
-    # Determine Device
+
+def train(args=None):
+    args = args or parse_args()
+    set_seed(args.seed)
+    os.makedirs(args.output_dir, exist_ok=True)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"System Check: Detected {device.upper()} for training.")
 
-    # 1. Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
+    if not os.path.isdir(args.tokenizer_dir):
+        raise FileNotFoundError(
+            f"Tokenizer not found at {args.tokenizer_dir}. "
+            "Run 01.5_generate_vocab.py and 02_tokenize.py first.")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
 
-    # 2. Load Model (Paper Architecture)
     config = get_tiny_tab_config(vocab_size=len(tokenizer))
     model = T5ForConditionalGeneration(config)
 
-    # 3. Load Cached Datasets (Turbo speed optimization)
-    if os.path.exists(CACHE_DIR):
-        print(f"Loading high-speed cached dataset from {CACHE_DIR}")
-        dataset = load_from_disk(CACHE_DIR)
+    if os.path.exists(args.cache_dir):
+        print(f"Loading high-speed cached dataset from {args.cache_dir}")
+        dataset = load_from_disk(args.cache_dir)
+        if "train" not in dataset or "validation" not in dataset:
+            raise ValueError(
+                f"Cache at {args.cache_dir} must contain 'train' and 'validation' splits, "
+                f"got {list(dataset.keys())}. Delete it and re-run 04_cache_dataset.py.")
         train_dataset = dataset["train"]
         val_dataset = dataset["validation"]
     else:
-        print(f"Warning: Cache not found at {CACHE_DIR}. Falling back to slow file-by-file loading.")
-        DATA_DIR = "dataset/processed/individual"
-        train_dataset = TabDataset("dataset/processed/train_files.txt", DATA_DIR, tokenizer, max_length=512)
-        val_dataset = TabDataset("dataset/processed/val_files.txt", DATA_DIR, tokenizer, max_length=512)
+        print(f"Cache not found at {args.cache_dir}. Falling back to file-by-file loading.")
+        train_dataset = TabDataset("dataset/processed/train_files.txt",
+                                   args.data_dir, tokenizer, max_length=args.max_length)
+        val_dataset = TabDataset("dataset/processed/val_files.txt",
+                                 args.data_dir, tokenizer, max_length=args.max_length)
+    if len(train_dataset) == 0 or len(val_dataset) == 0:
+        raise ValueError("Empty train or validation dataset; check splits and cache.")
 
-    # 4. Professional Training Arguments (Optimized for 6-8h target)
+    # Note: Adafactor (paper standard) does not use decoupled weight decay
+    # like AdamW; TrainingArguments.weight_decay is therefore 0.0 here to
+    # avoid implying regularization that is not applied.
     training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=32,
-        gradient_accumulation_steps=2,
-        num_train_epochs=60, # Increased to 60 for better convergence
-        learning_rate=5e-4, 
-        weight_decay=0.01,
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
+        num_train_epochs=args.epochs,
+        learning_rate=args.lr,
+        weight_decay=0.0,
         warmup_steps=1000,
         lr_scheduler_type="cosine",
-        eval_strategy="epoch", 
+        optim="adafactor",
+        eval_strategy="epoch",
         save_strategy="epoch",
         logging_strategy="steps",
         logging_steps=50,
@@ -108,41 +144,45 @@ def train():
         metric_for_best_model="loss",
         greater_is_better=False,
         save_total_limit=2,
-        ddp_find_unused_parameters=False,
+        seed=args.seed,
     )
 
-    # Optimizer: Adafactor
-    optimizer = Adafactor(
-        model.parameters(),
-        lr=5e-4,
-        relative_step=False,
-        warmup_init=False,
-    )
-
-    # Create Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        optimizers=(optimizer, None),
         callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=10), # Increased patience for deeper refinement
-            TrainLoggerCallback(LOG_FILE)
-        ]
+            EarlyStoppingCallback(early_stopping_patience=10),
+            TrainLoggerCallback(args.log_file),
+        ],
     )
 
-    print(f"Executing Training Protocol: Resuming for 60 Epochs Total")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"\nRESUMING TRAINING | Target Epochs: 60\n")
+    resume_checkpoint = resolve_resume_checkpoint(args.output_dir, args.resume)
+    if resume_checkpoint:
+        print(f"Resuming training from checkpoint: {resume_checkpoint}")
+        mode = "RESUMING"
+    else:
+        print("Starting fresh training run (no checkpoint resume).")
+        mode = "FRESH"
+    with open(args.log_file, "a") as f:
+        f.write(f"\n{mode} TRAINING | Target Epochs: {args.epochs} | Seed: {args.seed}\n")
         f.write("-" * 40 + "\n")
 
-    # Resume from latest checkpoint
-    trainer.train(resume_from_checkpoint=True)
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
 
-    print("Protocol Complete. Saving Optimized Model Artifacts...")
-    model.save_pretrained(os.path.join(OUTPUT_DIR, "final"))
-    tokenizer.save_pretrained(os.path.join(OUTPUT_DIR, "final"))
+    print("Training complete. Saving model artifacts...")
+    final_dir = os.path.join(args.output_dir, "final")
+    model.save_pretrained(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    with open(os.path.join(final_dir, "training_config.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "epochs": args.epochs, "batch_size": args.batch_size,
+            "grad_accum": args.grad_accum, "lr": args.lr, "seed": args.seed,
+            "tokenizer_dir": args.tokenizer_dir, "cache_dir": args.cache_dir,
+            "mode": mode, "resume_checkpoint": resume_checkpoint,
+        }, f, indent=2)
+
 
 if __name__ == "__main__":
     train()
