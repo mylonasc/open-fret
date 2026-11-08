@@ -321,6 +321,37 @@ Recommended protocol:
    is expected for a song-disjoint split and is **not itself leakage**. Nested
    collection directories are not reliable artist metadata.
 
+## Follow-up implemented after this investigation
+
+The recommendations were implemented as separate, auditable changes; the v3
+artifacts above were not modified.
+
+- **Anchored decoding** is integrated into inference/export/sample callbacks. It
+  builds one fingering slot per input attack and time shift, masks candidates to
+  pitch-equivalent fingerings, enforces distinct strings per onset with
+  lookahead feasibility, and gates EOS on consumed slots. Real-model tests cover
+  cached beam search, chords, techniques, repeated riffs, budgets and explicit
+  unsupported-input errors. On the 24 decodable windows of the frozen 512-window
+  panel, anchored decoding preserved **exactly 3,874 input notes/attacks with 0
+  same-string conflicts and timed F1 1.0** (4/24 exact reference fingerings).
+  Legacy decoding produced 8,324 notes, 1,183 conflicts and F1 ~0.06.
+- **Sustained-string occupancy across separate attacks remains unenforced** and
+  must not be claimed: the onset representation has no independent source note
+  ends.
+- **Supervision audit:** 0 invalid labels; 388 validation `[UNK]` labels caused
+  by train-only structural vocabulary; 46.4% of sampled train and 39.4% of
+  sampled validation windows contain at least one same-onset/same-string
+  reference group. `open_fret.curation` now masks those groups at onset level,
+  and `scripts/04_cache_dataset.py` records counts and rejects OOV tokens.
+- **Loss audit:** `scripts/audit_losses.py` independently reproduced the
+  vectorized CE/pitch/type objective on real validation rows to `~1e-7` with
+  finite gradients.
+- **Curated rerun:** `models/full-curated-3ep-20261109/` trains from scratch with
+  the structural-token vocabulary, curated cache, event-type marginal and
+  conditional pitch. Its five fixed samples are chosen only from decodable
+  validation windows. Results are reported in
+  [the run protocol](full_combined_run.md); no result is claimed until measured.
+
 ## Proposed next integration order
 
 1. Fix renderer completeness/durations and input EOS preprocessing; add exact

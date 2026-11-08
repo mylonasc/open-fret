@@ -1,4 +1,37 @@
-# Fresh combined-loss full run
+# Fresh combined-loss full runs
+
+## Curated rerun (loss-v4, November 2026)
+
+Run: `models/full-curated-3ep-20261109/` on
+`dataset/processed/loss-v4-curated-20261109/`.
+
+This rerun keeps the same parser, splits, architecture, seed, schedule and
+combined loss weights as the v3 run, but fixes supervision defects measured on
+the v3 checkpoint:
+
+- **Vocabulary conditioning:** `--structural-lists` includes `CAPO_*`,
+  `TUNING_*`, `NO_*`, `NF_*` and `TS_*` from train, validation and test. `TAB_*`
+  targets remain train-only. Vocabulary grows from 6,223 to 6,631 tokens and the
+  rebuilt cache contains **zero `[UNK]` labels** (v3 validation had 388).
+- **Target curation:** same-onset/same-string reference groups are masked at
+  group level. Counts are recorded in `cache/cache_manifest.json`: 441,322
+  masked windows and 23,621,234 masked note tokens across all cached splits
+  (train: 18,859,982 notes; validation: 2,351,014; test: 2,410,238). Time shifts
+  and unaffected onsets stay supervised.
+- **Loss implementation:** adds `--event-type-alpha 0.3` (macro-balanced
+  TAB/TS/EOS marginal) and `--conditional-pitch` (pitch normalized over
+  playable TAB tokens), with the same CE 0.3, smoothing 0.1 and pitch 1.0.
+  Independent audit of the v3 implementation matched the vectorized objective
+  to `~1e-7` with finite gradients.
+
+The frozen source-balanced validation panel and split files are byte-identical
+to v3, so anchored-generation metrics can be compared across the two systems on
+the same windows. This comparison confounds curation, vocabulary and loss
+changes; it is not an isolated ablation. Quality is selected by generated
+fidelity (input-attack preservation, timed pitch F1, distinct-string validity,
+EOS completion) and human listening, not by the composite validation loss.
+
+## First combined-loss run (loss-v3)
 
 Run: `models/full-combined-loss-3ep-20261108/` (initially running).
 
