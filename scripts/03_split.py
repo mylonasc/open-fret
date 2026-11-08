@@ -27,18 +27,26 @@ def _group_for_file(input_dir: str, filename: str) -> str:
 
 
 def split_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1, seed=42):
+    import time
     if not os.path.exists(input_dir):
-        print(f"Input directory {input_dir} does not exist.")
+        print(f"Input directory {input_dir} does not exist.", flush=True)
         return
+    t0 = time.time()
+    print("Listing input directory...", flush=True)
     files = sorted(f for f in os.listdir(input_dir) if f.endswith(".json"))
+    print(f"Found {len(files)} JSON files ({time.time()-t0:.1f}s).", flush=True)
     if not files:
         print("No processed JSON files found.")
         return
+    print("Deriving source groups from filenames...", flush=True)
     groups = [_group_for_file(input_dir, f) for f in files]
+    print(f"Grouped into {len(set(groups))} source groups ({time.time()-t0:.1f}s).", flush=True)
     train_files, val_files, test_files = split_by_group(
         files, groups, train_ratio=train_ratio, val_ratio=val_ratio, seed=seed)
-    assert_disjoint(train_files, val_files, test_files,
-                    group_of=lambda f: groups[files.index(f)] if f in files else f)
+    print("Verifying group disjointness...", flush=True)
+    file_to_group = dict(zip(files, groups))
+    assert_disjoint(train_files, val_files, test_files, group_of=file_to_group.get)
+    print(f"Disjointness OK ({time.time()-t0:.1f}s). Writing splits...", flush=True)
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, "train_files.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(train_files))
