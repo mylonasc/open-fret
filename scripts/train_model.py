@@ -35,6 +35,158 @@ except ImportError:  # when run as scripts/train_model.py without root on path
     from open_fret.training import load_init_model, resolve_resume_checkpoint
 
 
+def burnin_decay_factor(step, warmup_steps, decay_start_step, decay_factor):
+    """Linear burn-in -> hold -> single multiplicative decay (HPO schedule).
+
+    Mirrors ``scripts/hpo_optuna.py`` so the full run uses the winning
+    schedule exactly: warmup 0 -> lr over ``warmup_steps``, hold until
+    ``decay_start_step``, then scale by ``decay_factor``.
+    """
+    if step < warmup_steps:
+        return float(step) / float(max(warmup_steps, 1))
+    if step < decay_start_step:
+        return 1.0
+    return float(decay_factor)
+
+
+def select_sample_songs(val_files_path, data_dir, k=5):
+    """Pick K fixed validation windows from distinct songs for sample export.
+
+    ``val_files.txt`` entries look like ``<song>.tex__t<track>__c<capo>__w<win>.json``;
+    grouping by the song prefix gives musically distinct samples (not five
+    windows of the same song). Returns list of
+    ``{name, midi_tokens, tab_tokens}`` dicts.
+    """
+    with open(val_files_path, encoding="utf-8") as f:
+        names = [ln.strip() for ln in f if ln.strip()]
+    if not names:
+        raise ValueError(f"Empty split file: {val_files_path}")
+    seen, picked = set(), []
+    for name in names:
+        song = name.split("__t")[0]
+        if song in seen:
+            continue
+        seen.add(song)
+        picked.append(name)
+        if len(picked) >= k:
+            break
+    if len(picked) < k:  # tiny splits: pad with the first files in order
+        for name in names:
+            if name not in picked:
+                picked.append(name)
+            if len(picked) >= k:
+                break
+    samples = []
+    for name in picked[:k]:
+        path = os.path.join(data_dir, name)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        midi_tokens = data.get("midi") or data.get("input") or []
+        tab_tokens = data.get("tab") or data.get("target") or []
+        if not midi_tokens or not tab_tokens:
+            raise ValueError(f"Sample file {name} has empty midi/tab streams.")
+        samples.append({"name": os.path.splitext(name)[0],
+                        "midi_tokens": list(midi_tokens),
+                        "tab_tokens": list(tab_tokens)})
+    return samples
+
+
+class TabSampleCallback(TrainerCallback):
+    """On every validation, decode the fixed sample songs with current weights.
+
+    Uses the in-memory model (= the latest state at this step, equivalent to
+    the newest checkpoint once it is written) with deterministic greedy
+    decoding. Each eval writes::
+
+        <output_dir>/samples/step-<global_step>/<song>.{pred,ref,input}.txt
+        <song>.pred.tex / <song>.pred.ascii + manifest.json
+
+    Failures are logged, never fatal to training.
+    """
+
+    def __init__(self, tokenizer, samples, output_dir, run_name,
+                 max_input_tokens=512, max_new_tokens=512, log_path=None):
+        self.tokenizer = tokenizer
+        self.samples = samples
+        self.output_dir = output_dir
+        self.run_name = run_name
+        self.max_input_tokens = max_input_tokens
+        self.max_new_tokens = max_new_tokens
+        self.log_path = log_path
+
+    def _log(self, msg):
+        if self.log_path:
+            with open(self.log_path, "a") as f:
+                f.write(msg + "\n")
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        model = kwargs.get("model", None)
+        if model is None or not self.samples:
+            return control
+        from open_fret.render import TabRenderer
+        step = state.global_step
+        epoch = round(state.epoch or 0, 3)
+        out_dir = os.path.join(
+            self.output_dir, "samples", f"step-{step:08d}")
+        os.makedirs(out_dir, exist_ok=True)
+        was_training = model.training
+        model.eval()
+        renderer = TabRenderer()
+        manifest = {"run": self.run_name, "step": step, "epoch": epoch,
+                    "eval_metrics": metrics or {}, "songs": []}
+        try:
+            import torch
+            for s in self.samples:
+                try:
+                    enc = self.tokenizer(
+                        " ".join(s["midi_tokens"]),
+                        return_tensors="pt", truncation=True,
+                        max_length=self.max_input_tokens)
+                    enc = {k: v.to(model.device) for k, v in enc.items()}
+                    with torch.no_grad():
+                        out = model.generate(
+                            **enc, max_new_tokens=self.max_new_tokens,
+                            do_sample=False, num_beams=1,
+                            early_stopping=True)
+                    pred = self.tokenizer.decode(
+                        out[0], skip_special_tokens=True).split()
+                    base = "".join(
+                        c if (c.isalnum() or c in "-_.") else "_"
+                        for c in s["name"])[:120]
+                    with open(os.path.join(out_dir, f"{base}.pred.txt"),
+                              "w", encoding="utf-8") as f:
+                        f.write(" ".join(pred))
+                    with open(os.path.join(out_dir, f"{base}.ref.txt"),
+                              "w", encoding="utf-8") as f:
+                        f.write(" ".join(s["tab_tokens"]))
+                    with open(os.path.join(out_dir, f"{base}.input.txt"),
+                              "w", encoding="utf-8") as f:
+                        f.write(" ".join(s["midi_tokens"]))
+                    with open(os.path.join(out_dir, f"{base}.pred.tex"),
+                              "w", encoding="utf-8") as f:
+                        f.write(renderer.to_alphatex(pred, title=base))
+                    with open(os.path.join(out_dir, f"{base}.pred.ascii"),
+                              "w", encoding="utf-8") as f:
+                        f.write(renderer.to_ascii(pred))
+                    manifest["songs"].append(
+                        {"name": s["name"], "file": base,
+                         "n_pred": len(pred),
+                         "n_ref": len(s["tab_tokens"])})
+                except Exception as e:  # noqa: BLE001 - per-song isolation
+                    self._log(f"Sample export failed for {s.get('name')}: {e}")
+                    manifest["songs"].append(
+                        {"name": s.get("name"), "error": str(e)})
+        finally:
+            if was_training:
+                model.train()
+        with open(os.path.join(out_dir, "manifest.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+        self._log(f"Step {step:06d} | exported {len(manifest['songs'])} "
+                  f"tab samples -> {out_dir}")
+        return control
+
+
 class TrainLoggerCallback(TrainerCallback):
     def __init__(self, log_path):
         self.log_path = log_path
@@ -108,6 +260,20 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=-1,
                    help="If > 0, train at most this many steps (overrides --epochs). "
                         "Useful for smoke validation on the full dataset.")
+    p.add_argument("--warmup-steps", type=int, default=1000,
+                   help="Linear burn-in steps (HPO winner: 39 = 10k examples / 256 eff batch).")
+    p.add_argument("--decay-start-step", type=int, default=None,
+                   help="If set, hold LR until this step then multiply by "
+                        "--decay-factor (HPO winner: 391). Enables the HPO "
+                        "burn-in/decay schedule instead of cosine.")
+    p.add_argument("--decay-factor", type=float, default=0.1,
+                   help="Multiplicative LR decay applied at --decay-start-step.")
+    p.add_argument("--sample-songs", type=int, default=5,
+                   help="Fixed validation songs re-decoded to tab on every eval "
+                        "(0 disables sample export).")
+    p.add_argument("--sample-max-new-tokens", type=int, default=512)
+    p.add_argument("--val-files", default="dataset/processed/val_files.txt",
+                   help="Split list used to pick the fixed sample songs.")
     return p.parse_args()
 
 
@@ -168,6 +334,7 @@ def train(args=None):
     # Note: Adafactor (paper standard) does not use decoupled weight decay
     # like AdamW; TrainingArguments.weight_decay is therefore 0.0 here to
     # avoid implying regularization that is not applied.
+    use_hpo_schedule = args.decay_start_step is not None
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -177,8 +344,8 @@ def train(args=None):
         max_steps=args.max_steps,
         learning_rate=args.lr,
         weight_decay=0.0,
-        warmup_steps=1000,
-        lr_scheduler_type="cosine",
+        warmup_steps=args.warmup_steps,
+        lr_scheduler_type="constant" if use_hpo_schedule else "cosine",
         optim="adafactor",
         eval_strategy="steps",
         eval_steps=args.eval_steps,
@@ -197,15 +364,47 @@ def train(args=None):
         seed=args.seed,
     )
 
+    callbacks = [
+        EarlyStoppingCallback(early_stopping_patience=10),
+        TrainLoggerCallback(args.log_file),
+    ]
+    if args.sample_songs and int(args.sample_songs) > 0:
+        try:
+            samples = select_sample_songs(
+                args.val_files, args.data_dir, k=int(args.sample_songs))
+            print(f"Sample export: {len(samples)} fixed songs -> "
+                  f"{output_dir}/samples/step-<step>/ "
+                  f"({', '.join(s['name'][:40] for s in samples)})")
+            callbacks.append(TabSampleCallback(
+                tokenizer, samples, output_dir,
+                run_name=os.path.basename(os.path.normpath(output_dir)),
+                max_input_tokens=args.max_length,
+                max_new_tokens=args.sample_max_new_tokens,
+                log_path=args.log_file))
+        except Exception as e:  # noqa: BLE001 - sampling never blocks training
+            print(f"WARNING: sample export disabled ({e})")
+
+    optimizers = (None, None)
+    if use_hpo_schedule:
+        # Exact HPO schedule: Adafactor without relative-step/warmup-init,
+        # scaled by the burn-in/decay LambdaLR.
+        from transformers import Adafactor
+        from torch.optim.lr_scheduler import LambdaLR
+        optimizer = Adafactor(model.parameters(), lr=args.lr,
+                              relative_step=False, warmup_init=False)
+        scheduler = LambdaLR(
+            optimizer, lr_lambda=lambda s: burnin_decay_factor(
+                s, args.warmup_steps, args.decay_start_step,
+                args.decay_factor))
+        optimizers = (optimizer, scheduler)
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        callbacks=[
-            EarlyStoppingCallback(early_stopping_patience=10),
-            TrainLoggerCallback(args.log_file),
-        ],
+        optimizers=optimizers if use_hpo_schedule else None,
+        callbacks=callbacks,
     )
 
     resume_checkpoint = resolve_resume_checkpoint(args.output_dir, args.resume)
@@ -258,8 +457,13 @@ def train(args=None):
             "epochs": args.epochs, "max_steps": args.max_steps,
             "batch_size": args.batch_size, "grad_accum": args.grad_accum,
             "effective_batch": args.batch_size * args.grad_accum,
-            "lr": args.lr, "warmup_steps": 1000, "dropout": args.dropout,
+            "lr": args.lr, "warmup_steps": args.warmup_steps,
+            "decay_start_step": args.decay_start_step,
+            "decay_factor": args.decay_factor,
+            "schedule": ("burnin-decay" if use_hpo_schedule else "cosine"),
+            "dropout": args.dropout,
             "save_steps": args.save_steps, "eval_steps": args.eval_steps,
+            "sample_songs": args.sample_songs,
         },
         "mode": mode, "resume_checkpoint": resume_checkpoint,
         "status": "running",
