@@ -73,7 +73,7 @@ def main(url=None):
             page.evaluate("() => document.querySelector('midi-player').playing")) and t1 > t0,
             f"{t0}->{t1}")
 
-        page.click("text=⏹ MIDI")
+        page.click("button[title='Stop MIDI']")
         page.click("text=▶ Tab")
         page.wait_for_timeout(6000)
         tick = page.evaluate("""() => (document.querySelector('.ofv-root').innerText.match(/tick (\\d+)/) || [])[1] || null""")
