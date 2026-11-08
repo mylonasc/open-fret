@@ -45,15 +45,17 @@ def parse_args():
     p.add_argument("--trials", type=int, default=12)
     p.add_argument("--timeout", type=float, default=None,
                    help="Global study timeout in seconds.")
-    p.add_argument("--time-limit", type=float, default=1800,
-                   help="Per-trial wall-clock cap in seconds (default 30 min).")
-    p.add_argument("--study-name", default="dev-hpo-v1")
+    p.add_argument("--time-limit", type=float, default=2700,
+                   help="Per-trial wall-clock cap in seconds (backstop, default 45 min).")
     p.add_argument("--storage", default="sqlite:///hpo-dev.db")
     p.add_argument("--tokenizer-dir", default="dataset/processed/tab_tokenizer")
     p.add_argument("--cache-dir", default="dataset/processed/cached-dev-hpo-split-v1")
     p.add_argument("--output-root", default="models/hpo-dev-v1")
-    p.add_argument("--max-steps", type=int, default=50000,
-                   help="Safety step cap per trial; the time limit binds first.")
+    p.add_argument("--max-steps", type=int, default=-1,
+                   help="If > 0, overrides --max-epochs with a step budget.")
+    p.add_argument("--max-epochs", type=int, default=5,
+                   help="Epoch bound per trial (binds first; time cap is backstop).")
+    p.add_argument("--study-name", default="dev-hpo-v4")
     p.add_argument("--eval-steps", type=int, default=500)
     p.add_argument("--gpu-monitor-interval", type=float, default=5.0,
                    help="Seconds between nvidia-smi utilization polls per trial "
@@ -257,7 +259,8 @@ def objective(trial, args):
         output_dir=out_dir, per_device_train_batch_size=params["batch_size"],
         per_device_eval_batch_size=params["batch_size"],
         gradient_accumulation_steps=params["grad_accum"],
-        max_steps=args.max_steps, learning_rate=params["lr"],
+        num_train_epochs=args.max_epochs, max_steps=args.max_steps,
+        learning_rate=params["lr"],
         weight_decay=0.0, lr_scheduler_type="constant",
         eval_strategy="steps", eval_steps=args.eval_steps,
         save_strategy="no", logging_strategy="steps", logging_steps=50,
@@ -356,7 +359,7 @@ def main():
         raise SystemExit(f"HPO data check failed: {e}")
     study = optuna.create_study(study_name=args.study_name, storage=args.storage,
                                 load_if_exists=True, direction="minimize",
-                                pruner=optuna.pruners.MedianPruner())
+                                pruner=optuna.pruners.MedianPruner(n_warmup_steps=1000))
     study.optimize(lambda t: objective(t, args), n_trials=args.trials,
                    timeout=args.timeout)
     print(f"Best value: {study.best_value:.4f} params: {study.best_params}")
