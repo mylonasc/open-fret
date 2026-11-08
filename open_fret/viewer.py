@@ -118,11 +118,15 @@ def notes_to_midi_bytes(notes, tempo=120, ticks_per_beat=TICKS_PER_BEAT):
 
 
 def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
+                      reference_tab_tokens=None,
                       title="open-fret sample", tempo=120):
     """Build a viewer bundle dict (JSON-serializable).
 
     Provide either ``midi_path`` (a .mid file) or ``midi_tokens`` (model
     input token stream). ``tab_tokens`` is the predicted TAB token stream.
+    ``reference_tab_tokens`` is optional ground truth (e.g. a validation
+    window's reference); when supplied, viewers expose a predicted/actual
+    toggle backed by two independently rendered scores.
     """
     from open_fret.midi_io import midi_file_to_tokens
 
@@ -130,6 +134,8 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
         raise ValueError("tab_tokens is required (predicted TAB token stream).")
     if isinstance(tab_tokens, str):
         tab_tokens = tab_tokens.split()
+    if reference_tab_tokens is not None and isinstance(reference_tab_tokens, str):
+        reference_tab_tokens = reference_tab_tokens.split()
     if midi_path is not None:
         with open(midi_path, "rb") as f:
             midi_bytes = f.read()
@@ -143,9 +149,13 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
     else:
         raise ValueError("Provide midi_path or midi_tokens.")
 
-    alpha_tex = renderer_for_input(input_tokens, tempo=tempo).to_alphatex(tab_tokens, title=title)
+    renderer = renderer_for_input(input_tokens, tempo=tempo)
+    alpha_tex = renderer.to_alphatex(tab_tokens, title=title)
+    reference_alpha_tex = (renderer.to_alphatex(
+        reference_tab_tokens, title=f"{title} (actual reference)")
+        if reference_tab_tokens is not None else None)
     pitches = [n["pitch"] for n in midi_tokens_to_notes(input_tokens)]
-    return {
+    bundle = {
         "title": title,
         "tempo": tempo,
         "ticks_per_beat": TICKS_PER_BEAT,
@@ -161,6 +171,12 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
             "pitch_max": max(pitches) if pitches else None,
         },
     }
+    if reference_tab_tokens is not None:
+        bundle["reference_alpha_tex"] = reference_alpha_tex
+        bundle["reference_tab_tokens"] = list(reference_tab_tokens)
+        bundle["meta"]["n_reference_tab_tokens"] = len(reference_tab_tokens)
+    return bundle
+
 
 
 ALPHATAB_JS = ("https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0"

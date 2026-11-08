@@ -51,6 +51,10 @@ def test_auto_validation_and_checkpoint_html(tmp_path):
     assert "step-00000002/viewer.html" in (tmp_path / "samples/index.html").read_text()
     manifest = json.loads((page.parent / "manifest.json").read_text())
     assert all("error" not in song for song in manifest["songs"])
+    viewer = page.read_text()
+    assert "reference_alpha_tex" in viewer
+    assert "Actual reference TAB tokens" in viewer
+    assert "Choose predicted or actual tab" in viewer
 
 
 def test_select_sample_songs_skips_unsupported_midi(tmp_path):

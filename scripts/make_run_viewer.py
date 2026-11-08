@@ -63,9 +63,16 @@ def build_run_viewer(run_dir, step=None, step_dir=None, out_name="viewer.html"):
         with open(os.path.join(sdir, base + ".pred.txt"),
                   encoding="utf-8") as f:
             pred_tokens = f.read().split()
-        title = f"{song['name']} — predicted tab @ {step}"
+        ref_path = os.path.join(sdir, base + ".ref.txt")
+        ref_tokens = None
+        if os.path.isfile(ref_path):
+            with open(ref_path, encoding="utf-8") as f:
+                ref_tokens = f.read().split() or None
+        title = f"{song['name']} — predicted vs actual @ {step}"
         bundle = build_view_bundle(midi_tokens=midi_tokens,
-                                   tab_tokens=pred_tokens, title=title, tempo=song.get("tempo", 120))
+                                   tab_tokens=pred_tokens,
+                                   reference_tab_tokens=ref_tokens,
+                                   title=title, tempo=song.get("tempo", 120))
         sections.append(f"<h2>{html_utils.escape(title)}</h2>\n"
                         f"<p>pred {len(pred_tokens)} tokens, "
                         f"ref {song.get('n_ref')} tokens</p>\n"
@@ -84,7 +91,8 @@ def build_run_viewer(run_dir, step=None, step_dir=None, out_name="viewer.html"):
              f"(eval loss {loss_str})</h1>\n"
              f"<details><summary>Loss components / validation metrics</summary><pre>{metric_summary}</pre></details>"
             "<p>Needs internet access for CDN scripts + soundfont. "
-            "Each section: input MIDI (left) vs model-predicted tab (right).</p>\n"
+            "Each section: input MIDI (left) vs tab (right); use the "
+            "Predicted/Actual toggle above the score to compare fingerings.</p>\n"
             + deps
             + "\n<hr>\n".join(sections) + "\n</body></html>\n")
     out = os.path.join(sdir, args.out_name)

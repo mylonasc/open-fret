@@ -36,6 +36,15 @@ const CSS = `
   gap: 8px; padding: 6px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-card-head h4 { margin: 0; padding: 0; background: none; border: none;
   font-size: 13px; font-weight: 650; }
+.ofv-tab-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  justify-content: flex-end; }
+.ofv-mode { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 8px;
+  overflow: hidden; flex-shrink: 0; }
+.ofv-mode button { border: 0; background: #fff; color: #334155; padding: 5px 10px;
+  font-size: 12px; cursor: pointer; }
+.ofv-mode button + button { border-left: 1px solid #cbd5e1; }
+.ofv-mode button.active { background: #4f46e5; color: #fff; font-weight: 650; }
+.ofv-mode button:disabled { opacity: 0.45; cursor: default; }
 .ofv-zoom { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
 .ofv-zoom button { border: 1px solid #cbd5e1; background: #fff; border-radius: 6px;
   padding: 2px 9px; font-size: 12px; cursor: pointer; line-height: 1.6; }
@@ -83,6 +92,11 @@ export function TabDataViewer({ bundle }) {
   const trackRef = useRef([]);
   const [ready, setReady] = useState({ midi: false, tab: false });
   const [tabPlaying, setTabPlaying] = useState(false);
+  const [tabMode, setTabMode] = useState("predicted");
+  const pendingTickRef = useRef(null);
+  const hasReference = Boolean(bundle.reference_alpha_tex);
+  const activeTabMode = tabMode === "actual" && hasReference ? "actual" : "predicted";
+  const activeTex = activeTabMode === "actual" ? bundle.reference_alpha_tex : bundle.alpha_tex;
   const [muted, setMuted] = useState(false);
   const [tempo, setTempo] = useState(bundle.tempo || 120);
   const [tick, setTick] = useState(null);
@@ -152,6 +166,11 @@ export function TabDataViewer({ bundle }) {
   // TAB panel: render into the INNER node; the OUTER node is the scroll
   // element. (Passing the render node as its own scrollElement makes the
   // score grow wider on every render cycle.)
+  //
+  // The AlphaTabApi (and its player/soundfont) is created once per bundle and
+  // reused when swapping predicted/actual: only ``tex()`` changes the score.
+  // Recreating the player on each switch loses the seek position because the
+  // fresh player is not ready yet when we try to restore it.
   useEffect(() => {
     const el = tabRenderRef.current;
     if (!el) return;
@@ -192,7 +211,6 @@ export function TabDataViewer({ bundle }) {
             } catch (_) {}
           });
       } catch (_) {}
-      api.tex(bundle.alpha_tex);
       // Re-apply the user's zoom on (re)mount — a fresh Api starts at 1.0.
       try {
         if (api.settings && api.settings.display) {
@@ -234,7 +252,89 @@ export function TabDataViewer({ bundle }) {
       trackRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundle.alpha_tex, bundle.title]);
+  }, [bundle.title]);
+
+  // Swap the score when the user toggles predicted/actual, keeping the same
+  // player so playback/seeking survives the switch.
+  useEffect(() => {
+    const api = apiRef.current;
+    if (!api) return;
+    try {
+      if (api.settings && api.settings.display) {
+        api.settings.display.scale = zoomRef.current;
+      }
+      api.tex(activeTex);
+    } catch (err) {
+      addWarn(`AlphaTab failed to render this score: ${err}`);
+      return;
+    }
+
+    const target = pendingTickRef.current;
+    if (target == null) return;
+
+    let pollTimer = null;
+    let settleTimer = null;
+    let giveUpTimer = null;
+    const stop = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      if (settleTimer) clearTimeout(settleTimer);
+      if (giveUpTimer) clearTimeout(giveUpTimer);
+      pollTimer = settleTimer = giveUpTimer = null;
+    };
+    const verify = () => {
+      if (pendingTickRef.current == null) {
+        stop();
+        return;
+      }
+      try {
+        api.tickPosition = target;
+        if (Math.abs((api.tickPosition || 0) - target) > 2) return;
+      } catch (_) {
+        return;
+      }
+      if (settleTimer) return;
+      // A freshly loaded score may accept a position and then reset it while
+      // the player initialises, so require it to stay put briefly.
+      settleTimer = setTimeout(() => {
+        settleTimer = null;
+        try {
+          if (
+            pendingTickRef.current != null &&
+            Math.abs((api.tickPosition || 0) - target) <= 2
+          ) {
+            setTick(target);
+            pendingTickRef.current = null;
+            stop();
+          }
+        } catch (_) {}
+      }, 400);
+    };
+    const listen = (name, fn) => {
+      try {
+        api[name] && api[name].on && api[name].on(fn);
+      } catch (_) {}
+    };
+    const unlisten = (name, fn) => {
+      try {
+        api[name] && api[name].off && api[name].off(fn);
+      } catch (_) {}
+    };
+    for (const name of ["scoreLoaded", "renderFinished", "playerReady"]) {
+      listen(name, verify);
+    }
+    pollTimer = setInterval(verify, 250);
+    giveUpTimer = setTimeout(() => {
+      pendingTickRef.current = null;
+      stop();
+    }, 15000);
+    return () => {
+      stop();
+      for (const name of ["scoreLoaded", "renderFinished", "playerReady"]) {
+        unlisten(name, verify);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTex, bundle.title]);
 
   const playTab = () => {
     const api = apiRef.current;
@@ -256,6 +356,23 @@ export function TabDataViewer({ bundle }) {
       apiRef.current && apiRef.current.stop && apiRef.current.stop();
     } catch (_) {}
     setTabPlaying(false);
+  };
+  const switchTabMode = (mode) => {
+    if (mode === activeTabMode || (mode === "actual" && !hasReference)) return;
+    try {
+      pendingTickRef.current =
+        apiRef.current && typeof apiRef.current.tickPosition === "number"
+          ? apiRef.current.tickPosition
+          : tick;
+    } catch (_) {
+      pendingTickRef.current = tick;
+    }
+    try {
+      apiRef.current && apiRef.current.stop && apiRef.current.stop();
+    } catch (_) {}
+    setTabPlaying(false);
+    setReady((r) => ({ ...r, tab: false }));
+    setTabMode(mode);
   };
   const toggleMute = () => {
     const api = apiRef.current;
@@ -314,7 +431,10 @@ export function TabDataViewer({ bundle }) {
         <h3 className="ofv-title">{bundle.title || "open-fret sample"}</h3>
         <div className="ofv-badges">
           {meta.n_input_notes != null && <span className="ofv-badge">🎹 {meta.n_input_notes} notes in</span>}
-          {meta.n_tab_tokens != null && <span className="ofv-badge">🎸 {meta.n_tab_tokens} tab tokens out</span>}
+          {meta.n_tab_tokens != null && <span className="ofv-badge">🎸 {meta.n_tab_tokens} predicted tab tokens</span>}
+          {hasReference && meta.n_reference_tab_tokens != null && (
+            <span className="ofv-badge">🎼 {meta.n_reference_tab_tokens} actual tab tokens</span>
+          )}
           {bundle.tempo && <span className="ofv-badge">♪ {bundle.tempo} BPM source</span>}
         </div>
       </div>
@@ -376,15 +496,37 @@ export function TabDataViewer({ bundle }) {
         </div>
         <div className="ofv-card">
           <div className="ofv-card-head">
-            <h4>Predicted tab — click the score to seek</h4>
-            <div className="ofv-zoom">
-              <button onClick={() => applyZoom(zoom - 0.1)} disabled={!ready.tab || zoom <= 0.5}
-                title="Zoom out">A−</button>
-              <button className="ofv-zoom-label" onClick={() => applyZoom(1)}
-                disabled={!ready.tab} title="Reset zoom to 100%">
-                {Math.round(zoom * 100)}%</button>
-              <button onClick={() => applyZoom(zoom + 0.1)} disabled={!ready.tab || zoom >= 2}
-                title="Zoom in">A+</button>
+            <h4>{activeTabMode === "actual" ? "Actual reference tab" : "Predicted tab"} — click the score to seek</h4>
+            <div className="ofv-tab-controls">
+              <div className="ofv-mode" role="group" aria-label="Choose predicted or actual tab">
+                <button
+                  type="button"
+                  className={activeTabMode === "predicted" ? "active" : ""}
+                  aria-pressed={activeTabMode === "predicted"}
+                  onClick={() => switchTabMode("predicted")}
+                >
+                  Predicted
+                </button>
+                <button
+                  type="button"
+                  className={activeTabMode === "actual" ? "active" : ""}
+                  aria-pressed={activeTabMode === "actual"}
+                  disabled={!hasReference}
+                  title={hasReference ? "Show the validation reference fingering" : "No reference tab was saved for this sample"}
+                  onClick={() => switchTabMode("actual")}
+                >
+                  Actual
+                </button>
+              </div>
+              <div className="ofv-zoom">
+                <button onClick={() => applyZoom(zoom - 0.1)} disabled={!ready.tab || zoom <= 0.5}
+                  title="Zoom out">A−</button>
+                <button className="ofv-zoom-label" onClick={() => applyZoom(1)}
+                  disabled={!ready.tab} title="Reset zoom to 100%">
+                  {Math.round(zoom * 100)}%</button>
+                <button onClick={() => applyZoom(zoom + 0.1)} disabled={!ready.tab || zoom >= 2}
+                  title="Zoom in">A+</button>
+              </div>
             </div>
           </div>
           <div ref={tabScrollRef} className="ofv-tab-scroll"
@@ -396,9 +538,13 @@ export function TabDataViewer({ bundle }) {
       </div>
       <TokenInspector title="Input MIDI tokens" tokens={bundle.input_tokens} />
       <TokenInspector title="Predicted TAB tokens" tokens={bundle.tab_tokens} />
+      {hasReference && (
+        <TokenInspector title="Actual reference TAB tokens" tokens={bundle.reference_tab_tokens} />
+      )}
       <div className="ofv-foot">
         Tab audio uses the Salamander soundfont via CDN; MIDI panel uses the
         Magenta soundfont. Panels play independently — “Both” starts them together.
+        {hasReference && " Switch Predicted/Actual above the score to compare fingerings."}
       </div>
     </div>
   );

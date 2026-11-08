@@ -63,6 +63,17 @@ def test_build_view_bundle_from_tokens():
     assert "\\tempo" in bundle["alpha_tex"] and "\\track" in bundle["alpha_tex"]
     assert bundle["meta"]["n_input_notes"] > 0
     assert bundle["tab_tokens"] == d["tab"]
+    assert "reference_alpha_tex" not in bundle
+
+
+def test_build_view_bundle_includes_reference_tab():
+    d = _sample_window()
+    bundle = build_view_bundle(midi_tokens=d["midi"], tab_tokens=d["tab"],
+                               reference_tab_tokens=d["tab"], title="test")
+    assert bundle["reference_tab_tokens"] == d["tab"]
+    assert bundle["reference_alpha_tex"] != bundle["alpha_tex"]
+    assert "(actual reference)" in bundle["reference_alpha_tex"]
+    assert bundle["meta"]["n_reference_tab_tokens"] == len(d["tab"])
 
 
 def test_to_html_contains_mount_points():
