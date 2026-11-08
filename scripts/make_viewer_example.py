@@ -64,6 +64,7 @@ def main():
     with open(dist, encoding="utf-8") as f:
         dist_js = f.read()
     html = ("<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+            "<link rel=\"icon\" href=\"data:,\">"
             "<title>open-fret viewer example</title></head><body>\n"
             "<h2>open-fret viewer example (self-contained)</h2>\n"
             "<p>Needs internet access for CDN scripts + soundfont. "

@@ -41,6 +41,8 @@ export function TabDataViewer({ bundle }) {
   const tabRef = useRef(null);
   const apiRef = useRef(null);
   const playerRef = useRef(null);
+  const trackRef = useRef([]);
+  const [muted, setMuted] = useState(false);
   const [ready, setReady] = useState({ midi: false, tab: false });
   const [tabPlaying, setTabPlaying] = useState(false);
   const [tempo, setTempo] = useState(bundle.tempo || 120);
@@ -86,6 +88,7 @@ export function TabDataViewer({ bundle }) {
   }, [bundle.midi_b64, bundle.title]);
 
   // --- TAB panel: AlphaTab score with player ---
+  // NOTE: settings.tex is a *boolean*; tex CONTENT loads via api.tex().
   useEffect(() => {
     const el = tabRef.current;
     if (!el) return;
@@ -98,7 +101,6 @@ export function TabDataViewer({ bundle }) {
     let api = null;
     try {
       api = new AT.AlphaTabApi(el, {
-        tex: bundle.alpha_tex,
         player: {
           soundFont: SOUNDFONT_URL,
           enablePlayer: true,
@@ -107,23 +109,30 @@ export function TabDataViewer({ bundle }) {
         },
       });
       apiRef.current = api;
-      setReady((r) => ({ ...r, tab: true }));
-      // Beat cursor + progress, feature-detected (API surface varies by version).
+      try {
+        api.error &&
+          api.error.on &&
+          api.error.on((e) =>
+            addWarn(`AlphaTab score error: ${e && e.message ? e.message : e}`)
+          );
+      } catch (_) {}
+      try {
+        api.scoreLoaded &&
+          api.scoreLoaded.on &&
+          api.scoreLoaded.on((score) => {
+            setReady((r) => ({ ...r, tab: true }));
+            try {
+              trackRef.current = score && score.tracks ? score.tracks : [];
+            } catch (_) {}
+          });
+      } catch (_) {}
+      api.tex(bundle.alpha_tex);
       try {
         if (api.playedBeatChanged && api.playedBeatChanged.on) {
           api.playedBeatChanged.on(() => {
             try {
               if (typeof api.tickPosition === "number") setTick(api.tickPosition);
             } catch (_) {}
-          });
-        }
-      } catch (_) {}
-      try {
-        if (api.playerStateChanged && api.playerStateChanged.on) {
-          api.playerStateChanged.on((e) => {
-            const s = e && e.state !== undefined ? e.state : e;
-            // AlphaTabApi.PlayerState: 0 paused, 1 playing
-            setTabPlaying(s === 1);
           });
         }
       } catch (_) {}
@@ -136,6 +145,7 @@ export function TabDataViewer({ bundle }) {
         api && api.destroy && api.destroy();
       } catch (_) {}
       apiRef.current = null;
+      trackRef.current = [];
     };
   }, [bundle.alpha_tex, bundle.title]);
 
@@ -145,7 +155,11 @@ export function TabDataViewer({ bundle }) {
     try {
       if (typeof api.playPause === "function") api.playPause();
       else if (typeof api.play === "function") api.play();
-      else addWarn("This AlphaTab build exposes no play method.");
+      else {
+        addWarn("This AlphaTab build exposes no play method.");
+        return;
+      }
+      setTabPlaying(true);
     } catch (err) {
       addWarn(`Tab playback failed: ${err}`);
     }
@@ -155,6 +169,24 @@ export function TabDataViewer({ bundle }) {
       apiRef.current && apiRef.current.stop && apiRef.current.stop();
     } catch (_) {}
     setTabPlaying(false);
+  };
+  const toggleMute = () => {
+    const api = apiRef.current;
+    const tracks = trackRef.current;
+    if (!api || !tracks.length) {
+      addWarn("Mute needs a loaded score (wait for the tab to render).");
+      return;
+    }
+    try {
+      if (typeof api.changeTrackMute === "function") {
+        api.changeTrackMute(tracks, !muted);
+        setMuted(!muted);
+      } else {
+        addWarn("This AlphaTab build exposes no changeTrackMute.");
+      }
+    } catch (err) {
+      addWarn(`Mute failed: ${err}`);
+    }
   };
   const playMidi = () => {
     try {
@@ -206,6 +238,9 @@ export function TabDataViewer({ bundle }) {
           {tabPlaying ? "⏸ Tab" : "▶ Tab"}
         </button>
         <button onClick={stopTab}>⏹ Tab</button>
+        <button onClick={toggleMute} disabled={!ready.tab}>
+          {muted ? "🔈 Unmute tab" : "🔇 Mute tab"}
+        </button>
         <button onClick={playBoth} disabled={!(ready.midi && ready.tab)}>
           ▶▶ Both
         </button>

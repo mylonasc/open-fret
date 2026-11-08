@@ -12,4 +12,6 @@ checkpoints/
 wandb/
 GOAL.md 
 DATASET.md
-train_log.txtnode_modules
+train_log.txt
+node_modules/
+

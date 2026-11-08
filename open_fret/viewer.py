@@ -117,7 +117,7 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
     else:
         raise ValueError("Provide midi_path or midi_tokens.")
 
-    alpha_tex = TabRenderer(tempo=tempo).to_alphatex(tab_tokens)
+    alpha_tex = TabRenderer(tempo=tempo).to_alphatex(tab_tokens, title=title)
     pitches = [n["pitch"] for n in midi_tokens_to_notes(input_tokens)]
     return {
         "title": title,
@@ -155,9 +155,14 @@ def to_html(bundle, dist_js, mount_name="TabDataViewer"):
     # json.dumps never emits "</script>", but TAB/AlphaTex text is
     # user-derived; neutralize the closing tag unconditionally.
     bundle_json = json.dumps(bundle).replace("</", "<\\/")
+    # NOTE: the dist bundle must come BEFORE the mount script — scripts
+    # execute in order, and mounting needs window[mount_name] to exist.
     return f"""<div id="ofv-{uid}" class="ofv-root"></div>
 <script src="{MIDI_PLAYER_JS}"></script>
 <script src="{ALPHATAB_JS}"></script>
+<script>
+{dist_js}
+</script>
 <script>
 (function() {{
   if (!window.{mount_name}) {{
@@ -179,9 +184,6 @@ def to_html(bundle, dist_js, mount_name="TabDataViewer"):
     console.error(err);
   }}
 }})();
-</script>
-<script>
-{dist_js}
 </script>"""
 
 

@@ -25,18 +25,25 @@ class TabRenderer:
         self.tempo = tempo
         self.tuning_str = tuning_str
 
-    def to_alphatex(self, tokens) -> str:
+    def to_alphatex(self, tokens, title="open-fret") -> str:
         if isinstance(tokens, str):
             tokens = tokens.split()
         chords, gaps = self._collect_chords(tokens)
-        parts_out = [f"\\tempo {self.tempo}", "\\track", f"\\tuning {self.tuning_str}", "."]
+        # Header format mirrors upstream guitartab (vladsavelyev) output:
+        # quoted title/track names are required — bare \track is rejected
+        # by AlphaTab's importer ("invalid value: 'null'").
+        lines = [f'\\title "{title}"', f"\\tempo {self.tempo}", ".",
+                 '\\track "Tab"', "\\instrument 29",
+                 f"\\tuning {self.tuning_str}"]
+        body: list[str] = []
         for chord_notes, gap in zip(chords, gaps):
             dur_tok = _duration_token(gap) if gap > 0 else ":4"
             if dur_tok is None:
                 dur_tok = ":4"
-            parts_out.append(dur_tok)
-            parts_out.append(self.format_chord(chord_notes))
-        return " ".join(parts_out)
+            body.append(dur_tok)
+            body.append(self.format_chord(chord_notes))
+        lines.append(" ".join(body))
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _collect_chords(tokens: list[str]) -> tuple[list[list[str]], list[int]]:

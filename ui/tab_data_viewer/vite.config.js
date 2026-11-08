@@ -3,6 +3,9 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // Force the production constant: bare `process` does not exist in
+  // browsers and some bundled deps guard on process.env.NODE_ENV.
+  define: { "process.env.NODE_ENV": JSON.stringify("production") },
   build: {
     lib: {
       entry: "src/index.jsx",
