@@ -99,9 +99,11 @@ if __name__ == "__main__":
     ap.add_argument("--tokenizer-dir", default="dataset/processed/tab_tokenizer")
     ap.add_argument("--data-dir", default="dataset/processed/individual")
     ap.add_argument("--cache-dir", default="dataset/processed/cached_dataset")
+    ap.add_argument("--train-list", default="dataset/processed/train_files.txt")
+    ap.add_argument("--val-list", default="dataset/processed/val_files.txt")
+    ap.add_argument("--test-list", default="dataset/processed/test_files.txt",
+                    help="Missing/empty test list is skipped (dev subsets).")
     a = ap.parse_args()
     create_cache(tokenizer_dir=a.tokenizer_dir, data_dir=a.data_dir,
-                 train_list="dataset/processed/train_files.txt",
-                 val_list="dataset/processed/val_files.txt",
-                 test_list="dataset/processed/test_files.txt",
-                 cache_dir=a.cache_dir)
+                 train_list=a.train_list, val_list=a.val_list,
+                 test_list=a.test_list, cache_dir=a.cache_dir)
