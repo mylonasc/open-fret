@@ -144,12 +144,17 @@ MIDI_PLAYER_JS = ("https://cdn.jsdelivr.net/combine/npm/tone@14.7.77,"
                   "npm/focus-visible@5,npm/html-midi-player@1.5.0")
 
 
-def to_html(bundle, dist_js, mount_name="TabDataViewer"):
+def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
     """Render a self-contained viewer HTML string for notebook/page embedding.
 
     ``dist_js`` is the built UMD bundle text (reads
     ui/tab_data_viewer/dist/* at call sites). Each call mints unique element
     ids so multiple cells can coexist.
+
+    Pass ``with_deps=False`` (and ``dist_js=None``) for the 2nd..Nth bundle
+    on a page that already includes the CDN scripts + dist bundle once —
+    re-including them redefines the ``midi-player`` custom element and
+    throws. See ``scripts/make_run_viewer.py``.
     """
     uid = uuid.uuid4().hex[:8]
     # json.dumps never emits "</script>", but TAB/AlphaTex text is
@@ -157,12 +162,14 @@ def to_html(bundle, dist_js, mount_name="TabDataViewer"):
     bundle_json = json.dumps(bundle).replace("</", "<\\/")
     # NOTE: the dist bundle must come BEFORE the mount script — scripts
     # execute in order, and mounting needs window[mount_name] to exist.
-    return f"""<div id="ofv-{uid}" class="ofv-root"></div>
-<script src="{MIDI_PLAYER_JS}"></script>
-<script src="{ALPHATAB_JS}"></script>
-<script>
-{dist_js}
-</script>
+    deps = ""
+    if with_deps:
+        if dist_js is None:
+            raise ValueError("dist_js is required when with_deps=True.")
+        deps = (f'<script src="{MIDI_PLAYER_JS}"></script>\n'
+                f'<script src="{ALPHATAB_JS}"></script>\n'
+                f"<script>\n{dist_js}\n</script>\n")
+    return f"""{deps}<div id="ofv-{uid}" class="ofv-root"></div>
 <script>
 (function() {{
   if (!window.{mount_name}) {{
