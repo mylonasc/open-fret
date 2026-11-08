@@ -5,13 +5,21 @@ from __future__ import annotations
 import random
 
 
+import re
+
+_NEW_SCHEME_RE = re.compile(r"^(.*)__t\d+__c\d+__w\d+\.json$")
+
+
 def group_id_from_filename(filename: str) -> str:
     """Derive source-song group from a processed JSON filename.
 
-    New files are ``<relpath with __>__item_<k>.json``; legacy files may
-    be plain names. The group is everything before ``__item_``.
+    New scheme: ``<relpath with __>__t<track>__c<capo>__w<window>.json``.
+    Legacy scheme: ``<name>__item_<k>.json``.
     """
     base = filename.rsplit("/", 1)[-1]
+    m = _NEW_SCHEME_RE.match(base)
+    if m:
+        return m.group(1)
     if "__item_" in base:
         return base.split("__item_")[0]
     # Fall back to stem without extension.

@@ -9,7 +9,12 @@ from open_fret.splits import split_by_group, assert_disjoint, group_id_from_file
 
 
 def _group_for_file(input_dir: str, filename: str) -> str:
-    # Prefer the embedded ``source`` field; fall back to filename heuristic.
+    # Fast path: derive from filename (exact for names written by 01_process).
+    # Only read the file if the name doesn't match known schemes.
+    gid = group_id_from_filename(filename)
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    if gid != stem:
+        return gid
     try:
         with open(os.path.join(input_dir, filename), "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -18,7 +23,7 @@ def _group_for_file(input_dir: str, filename: str) -> str:
             return str(src)
     except Exception:
         pass
-    return group_id_from_filename(filename)
+    return gid
 
 
 def split_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1, seed=42):

@@ -87,6 +87,9 @@ def parse_args():
                         "e.g. 't5-small') to fine-tune instead of training from scratch.")
     p.add_argument("--dropout", type=float, default=None,
                    help="Override config dropout_rate (both scratch and pretrained).")
+    p.add_argument("--max-steps", type=int, default=-1,
+                   help="If > 0, train at most this many steps (overrides --epochs). "
+                        "Useful for smoke validation on the full dataset.")
     return p.parse_args()
 
 
@@ -139,6 +142,7 @@ def train(args=None):
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         num_train_epochs=args.epochs,
+        max_steps=args.max_steps,
         learning_rate=args.lr,
         weight_decay=0.0,
         warmup_steps=1000,

@@ -22,3 +22,18 @@ def test_group_split_no_leakage():
             else:
                 holders.append("test")
         assert len(set(holders)) == 1, f"{song} split across {holders}"
+
+
+def test_new_scheme_grouping():
+    files = [
+        "Band__Song__t0__c0__w0.json",
+        "Band__Song__t0__c0__w1.json",
+        "Band__Song__t1__c3__w0.json",
+        "Other__Track__t0__c0__w0.json",
+    ]
+    groups = [group_id_from_filename(f) for f in files]
+    assert groups[:3] == ["Band__Song"] * 3
+    assert groups[3] == "Other__Track"
+    train, val, test = split_by_group(files, groups, train_ratio=0.5,
+                                      val_ratio=0.25, seed=0)
+    assert_disjoint(train, val, test)
