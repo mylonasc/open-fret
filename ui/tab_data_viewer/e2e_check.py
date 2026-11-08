@@ -2,7 +2,8 @@
 
 Serves the repo over HTTP, loads demo/example_output.html in Chromium,
 and asserts: React mounted, AlphaTab rendered SVGs, MIDI plays with
-advancing position, tab plays with advancing tick, mute toggle works.
+advancing position, tab plays with advancing tick, mute toggle works,
+click-to-seek moves the playhead, zoom enlarges/resets the score.
 
 Requires: playwright + a Chromium (playwright cache or Google Chrome).
 Run:  python ui/tab_data_viewer/e2e_check.py [--url URL]
@@ -82,6 +83,38 @@ def main(url=None):
         page.click("text=Mute tab")
         check("mute toggles",
               page.evaluate("() => document.body.innerText.includes('Unmute tab')"))
+
+        # click-to-seek: stop playback, click mid-score, playhead must jump
+        page.click("button[title='Stop tab']")
+        page.wait_for_timeout(1000)
+        box = page.evaluate(
+            "() => { const s = document.querySelector('.ofv-root svg');"
+            " if (!s) return null; const r = s.getBoundingClientRect();"
+            " return {x: r.x, y: r.y, w: r.width, h: r.height}; }")
+        if box:
+            page.mouse.click(box["x"] + box["w"] * 0.7,
+                             box["y"] + box["h"] * 0.3)
+            page.wait_for_timeout(1500)
+        tick1 = page.evaluate(
+            "() => { const r = document.querySelector('.ofv-tab-render');"
+            " return r && r._ofvApi ? r._ofvApi.tickPosition : -999; }")
+        check("click seeks playhead", tick1 is not None and tick1 > 0,
+              f"tick={tick1}")
+
+        # zoom: score must get taller at 110%, reset restores 100%
+        h0 = page.evaluate(
+            "() => document.querySelector('.ofv-tab-render').getBoundingClientRect().height")
+        page.click(".ofv-zoom >> text=A+")
+        page.wait_for_timeout(4000)
+        zh = page.evaluate(
+            "() => ({h: document.querySelector('.ofv-tab-render').getBoundingClientRect().height,"
+            " label: document.querySelector('.ofv-zoom-label').textContent})")
+        check("zoom enlarges score", zh["h"] > h0 + 5 and zh["label"] == "110%",
+              f"{h0:.0f}->{zh['h']:.0f} label={zh['label']}")
+        page.click(".ofv-zoom-label")
+        page.wait_for_timeout(3000)
+        check("zoom resets",
+              page.evaluate("() => document.querySelector('.ofv-zoom-label').textContent") == "100%")
         browser.close()
 
     real_errors = [e for e in errors if "404" not in e and "favicon" not in e.lower()]

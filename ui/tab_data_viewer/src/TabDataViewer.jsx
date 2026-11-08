@@ -6,7 +6,7 @@ const SOUNDFONT_URL =
   "https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/soundfont/sonivox.sf2";
 
 const CSS = `
-.ofv { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1c1c1e; max-width: 1080px; }
+.ofv { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1c1c1e; max-width: 1400px; }
 .ofv-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 2px 0 10px; }
 .ofv-title { font-size: 18px; margin: 0; font-weight: 650; }
 .ofv-badges { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -23,7 +23,8 @@ const CSS = `
 .ofv-tempo { font-size: 13px; color: #475569; display: flex; align-items: center; gap: 6px; }
 .ofv-tempo select { border: 1px solid #cbd5e1; border-radius: 6px; padding: 4px 6px; font-size: 13px; }
 .ofv-tick { font-size: 12px; color: #64748b; font-variant-numeric: tabular-nums; }
-.ofv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ofv-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 12px; }
+@media (max-width: 760px) { .ofv-grid { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .ofv-grid { grid-template-columns: 1fr; } }
 .ofv-card { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #fff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); min-width: 0; }
@@ -31,7 +32,18 @@ const CSS = `
   background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-midi-body { padding: 10px 12px; min-height: 120px; }
 .ofv-midi-body midi-player { width: 100%; }
-.ofv-tab-scroll { overflow: auto; max-height: 440px; max-width: 100%; }
+.ofv-card-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
+.ofv-card-head h4 { margin: 0; padding: 0; background: none; border: none;
+  font-size: 13px; font-weight: 650; }
+.ofv-zoom { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.ofv-zoom button { border: 1px solid #cbd5e1; background: #fff; border-radius: 6px;
+  padding: 2px 9px; font-size: 12px; cursor: pointer; line-height: 1.6; }
+.ofv-zoom button:disabled { opacity: 0.45; cursor: default; }
+.ofv-zoom-label { font-size: 12px; color: #475569; min-width: 46px; text-align: center;
+  font-variant-numeric: tabular-nums; cursor: pointer; border: none; background: none; }
+.ofv-tab-scroll { overflow: auto; max-height: 70vh; min-height: 200px; max-width: 100%;
+  resize: vertical; }
 .ofv-tab-render { width: 100%; min-width: 0; }
 .ofv-skeleton { padding: 24px; color: #94a3b8; font-size: 13px; text-align: center;
   background: repeating-linear-gradient(45deg, #f8fafc, #f8fafc 10px, #f1f5f9 10px, #f1f5f9 20px); }
@@ -74,6 +86,28 @@ export function TabDataViewer({ bundle }) {
   const [muted, setMuted] = useState(false);
   const [tempo, setTempo] = useState(bundle.tempo || 120);
   const [tick, setTick] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  const applyZoom = (z) => {
+    const clamped = Math.min(2, Math.max(0.5, Math.round(z * 20) / 20));
+    zoomRef.current = clamped;
+    setZoom(clamped);
+    const api = apiRef.current;
+    if (!api) return;
+    try {
+      if (api.settings && api.settings.display) {
+        api.settings.display.scale = clamped;
+        // ScoreRenderer.updateSettings only stores settings — render() is
+        // what re-layouts at the new scale.
+        if (typeof api.updateSettings === "function") api.updateSettings();
+        if (typeof api.render === "function") api.render();
+      } else {
+        addWarn("This AlphaTab build exposes no display scale setting.");
+      }
+    } catch (err) {
+      addWarn(`Zoom failed: ${err}`);
+    }
+  };
   const [warn, setWarn] = useState([]);
 
   const addWarn = (m) => setWarn((w) => (w.includes(m) ? w : [...w, m]));
@@ -139,6 +173,9 @@ export function TabDataViewer({ bundle }) {
       });
       apiRef.current = api;
       try {
+        el._ofvApi = api;
+      } catch (_) {} // test/debug hook (e2e reads tickPosition)
+      try {
         api.error &&
           api.error.on &&
           api.error.on((e) =>
@@ -156,6 +193,26 @@ export function TabDataViewer({ bundle }) {
           });
       } catch (_) {}
       api.tex(bundle.alpha_tex);
+      // Re-apply the user's zoom on (re)mount — a fresh Api starts at 1.0.
+      try {
+        if (api.settings && api.settings.display) {
+          api.settings.display.scale = zoomRef.current;
+        }
+      } catch (_) {}
+      // Click-to-seek: AlphaTab doesn't move the playhead on click by
+      // itself — beatMouseDown gives the beat, playbackStart is its tick.
+      try {
+        if (api.beatMouseDown && api.beatMouseDown.on) {
+          api.beatMouseDown.on((beat) => {
+            try {
+              if (beat && typeof beat.playbackStart === "number") {
+                api.tickPosition = beat.playbackStart;
+                setTick(beat.playbackStart);
+              }
+            } catch (_) {}
+          });
+        }
+      } catch (_) {}
       try {
         if (api.playedBeatChanged && api.playedBeatChanged.on) {
           api.playedBeatChanged.on(() => {
@@ -318,8 +375,20 @@ export function TabDataViewer({ bundle }) {
           </div>
         </div>
         <div className="ofv-card">
-          <h4>Predicted tab — click the score to seek</h4>
-          <div ref={tabScrollRef} className="ofv-tab-scroll">
+          <div className="ofv-card-head">
+            <h4>Predicted tab — click the score to seek</h4>
+            <div className="ofv-zoom">
+              <button onClick={() => applyZoom(zoom - 0.1)} disabled={!ready.tab || zoom <= 0.5}
+                title="Zoom out">A−</button>
+              <button className="ofv-zoom-label" onClick={() => applyZoom(1)}
+                disabled={!ready.tab} title="Reset zoom to 100%">
+                {Math.round(zoom * 100)}%</button>
+              <button onClick={() => applyZoom(zoom + 0.1)} disabled={!ready.tab || zoom >= 2}
+                title="Zoom in">A+</button>
+            </div>
+          </div>
+          <div ref={tabScrollRef} className="ofv-tab-scroll"
+            title="Drag the bottom edge to resize">
             {!ready.tab && <div className="ofv-skeleton">Rendering tab…</div>}
             <div ref={tabRenderRef} className="ofv-tab-render" />
           </div>

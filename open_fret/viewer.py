@@ -64,11 +64,16 @@ def midi_tokens_to_notes(midi_tokens, default_duration=480):
 
 
 def notes_to_midi_bytes(notes, tempo=120, ticks_per_beat=TICKS_PER_BEAT):
-    """Serialize notes to Standard MIDI bytes (pretty_midi)."""
+    """Serialize notes to Standard MIDI bytes (pretty_midi).
+
+    Program is Acoustic Guitar (nylon) so the html-midi-player panel — which
+    picks its soundfont samples from the MIDI program — sounds classical,
+    matching the AlphaTab tab track (``\\instrument 24``).
+    """
     import pretty_midi
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=tempo)
-    program = pretty_midi.instrument_name_to_program("Acoustic Guitar (steel)")
+    program = pretty_midi.instrument_name_to_program("Acoustic Guitar (nylon)")
     instrument = pretty_midi.Instrument(program=program, is_drum=False)
     sec_per_tick = 60.0 / (tempo * ticks_per_beat)
     for n in notes:

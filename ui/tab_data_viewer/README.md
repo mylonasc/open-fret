@@ -56,10 +56,12 @@ show(bundle)   # needs npm run build to have been run once
 ## Status
 
 Browser-verified with headless Chrome (Playwright, `e2e_check.py` in this
-folder): notation + tab staves render, MIDI plays with advancing position,
-tab plays with advancing tick readout, track mute toggle works, play-both
-starts the MIDI side, token inspectors render — zero JS errors, zero failed
-requests. Real bugs this caught and fixed:
+folder, 13 assertions): notation + tab staves render, MIDI plays with
+advancing position, tab plays with advancing tick readout, track mute
+toggle works, play-both starts the MIDI side, click-to-seek moves the
+playhead, zoom (A−/A+/reset) re-layouts the score, token inspectors
+render — zero JS errors, zero failed requests. Real bugs this caught and
+fixed:
 1. Vite lib build leaking `process.env.NODE_ENV` (fixed with explicit
    `define`; bundle dropped 478KB → 149KB as a bonus),
 2. mount script running before the dist bundle (script order),

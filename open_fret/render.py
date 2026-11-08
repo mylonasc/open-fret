@@ -4,6 +4,15 @@ from __future__ import annotations
 
 STANDARD_TUNING_STR = "E5 B4 G4 D4 A3 E3"
 
+# General MIDI program number (0-indexed) used for the tab track.
+# 24 = Acoustic Guitar (nylon) — the classical sound. (Was 29/Overdrive.)
+NYLON_GUITAR_PROGRAM = 24
+
+# Sounding-pitch equivalent of STANDARD_TUNING_STR (see
+# TabRenderer.sounding_tuning): what the AlphaTex header must carry so tab
+# playback lands on concert pitch in AlphaTab.
+SOUNDING_TUNING_STR = "E4 B3 G3 D3 A2 E2"
+
 _DUR_MAP = {
     1920: ":1", 1440: ":1.", 960: ":2", 720: ":2.",
     480: ":4", 360: ":4.", 240: ":8", 180: ":8.",
@@ -25,6 +34,21 @@ class TabRenderer:
         self.tempo = tempo
         self.tuning_str = tuning_str
 
+    @staticmethod
+    def sounding_tuning(tuning_str: str) -> str:
+        """Written pitch -> sounding pitch (one octave down).
+
+        Guitar music is written an octave above concert pitch; AlphaTab maps
+        note names literally (E5 -> MIDI 76), so the header must carry the
+        sounding octave (E4 -> MIDI 64) for tab audio to match the MIDI.
+        """
+        import re
+
+        def down_octave(tok: str) -> str:
+            return re.sub(r"(\d+)$",
+                          lambda m: str(int(m.group(1)) - 1), tok)
+        return " ".join(down_octave(t) for t in tuning_str.split())
+
     def to_alphatex(self, tokens, title="open-fret") -> str:
         if isinstance(tokens, str):
             tokens = tokens.split()
@@ -33,8 +57,8 @@ class TabRenderer:
         # quoted title/track names are required — bare \track is rejected
         # by AlphaTab's importer ("invalid value: 'null'").
         lines = [f'\\title "{title}"', f"\\tempo {self.tempo}", ".",
-                 '\\track "Tab"', "\\instrument 29",
-                 f"\\tuning {self.tuning_str}"]
+                 '\\track "Tab"', f"\\instrument {NYLON_GUITAR_PROGRAM}",
+                 f"\\tuning {self.sounding_tuning(self.tuning_str)}"]
         body: list[str] = []
         for chord_notes, gap in zip(chords, gaps):
             dur_tok = _duration_token(gap) if gap > 0 else ":4"
