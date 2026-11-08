@@ -14,4 +14,5 @@ GOAL.md
 DATASET.md
 train_log.txt
 node_modules/
-
+!tools/alphatex_parser/package.json
+!tools/alphatex_parser/package-lock.json

@@ -27,6 +27,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from open_fret.loss_training import (TabLossTrainer, add_loss_arguments,
+                                     loss_config_from_args, validate_loss_cache)
+from open_fret.losses import LossConfig
+from open_fret.token_metadata import TokenMetadata
+
 SPACE = {
     "lr": (1e-5, 1e-3, True),
     "dropout": (0.0, 0.2),
@@ -42,6 +47,7 @@ SPACE = {
 
 def parse_args():
     p = argparse.ArgumentParser()
+    add_loss_arguments(p)
     p.add_argument("--trials", type=int, default=12)
     p.add_argument("--timeout", type=float, default=None,
                    help="Global study timeout in seconds.")
@@ -99,22 +105,43 @@ try:
 
     class LossHistoryCallback(_TC):
         """Collect train/eval loss curves; prune on intermediate eval loss."""
-        def __init__(self, trial):
+        def __init__(self, trial, history_path=None):
             self.trial = trial
+            self.history_path = history_path
             self.train_curve: list = []
             self.eval_curve: list = []
+
+        def persist(self):
+            # Persist before pruning/failure too, not just at successful trial end.
+            self.trial.set_user_attr("train_component_curve", self.train_curve)
+            self.trial.set_user_attr("eval_component_curve", self.eval_curve)
+            for prefix, curve, key in (("train", self.train_curve, "loss"),
+                                       ("eval", self.eval_curve, "eval_loss")):
+                self.trial.set_user_attr(prefix + "_loss_curve", [row[key] for row in curve])
+                self.trial.set_user_attr(prefix + "_loss_steps", [row["step"] for row in curve])
+            if self.history_path:
+                with open(self.history_path, "w", encoding="utf-8") as f:
+                    json.dump({"train": self.train_curve, "eval": self.eval_curve}, f, indent=2)
+
+        @staticmethod
+        def components(logs):
+            return {key: float(value) for key, value in logs.items()
+                    if isinstance(value, (int, float)) and (
+                        "loss" in key or "smoothing" in key or "note_positions" in key)}
 
         def on_log(self, args, state, control, logs=None, **kwargs):
             if logs and "loss" in logs:
                 self.train_curve.append(
-                    {"step": state.global_step, "loss": float(logs["loss"])})
+                    {"step": state.global_step, **self.components(logs)})
+                self.persist()
             return control
 
         def on_evaluate(self, args, state, control, metrics=None, **kwargs):
             if metrics and "eval_loss" in metrics:
                 self.eval_curve.append(
                     {"step": state.global_step,
-                     "eval_loss": float(metrics["eval_loss"])})
+                     **self.components(metrics)})
+                self.persist()
                 self.trial.report(float(metrics["eval_loss"]),
                                   step=state.global_step)
                 if self.trial.should_prune():
@@ -224,6 +251,9 @@ def objective(trial, args):
     import optuna
 
     params = suggest(trial)
+    loss_config = loss_config_from_args(args)
+    validate_loss_cache(args.cache_dir, loss_config)
+    trial.set_user_attr("loss_config", loss_config.to_dict())
     eff_batch = params["batch_size"] * params["grad_accum"]
     warmup_steps = max(1, round(params["warmup_examples"] / eff_batch))
     decay_start = max(warmup_steps + 1,
@@ -245,6 +275,7 @@ def objective(trial, args):
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "trial_params.json"), "w", encoding="utf-8") as f:
         json.dump({"trial": trial.number, "params": params, "init": init_info,
+                   "loss": loss_config.to_dict(),
                    "warmup_steps": warmup_steps, "decay_start_step": decay_start,
                    "effective_batch": eff_batch}, f, indent=2)
 
@@ -254,7 +285,8 @@ def objective(trial, args):
         optimizer, lr_lambda=lambda s: burnin_decay_factor(
             s, warmup_steps, decay_start, params["decay_factor"]))
 
-    history_cb = LossHistoryCallback(trial)
+    history_cb = LossHistoryCallback(
+        trial, os.path.join(out_dir, f"trial_{trial.number}_components.json"))
     targs = TrainingArguments(
         output_dir=out_dir, per_device_train_batch_size=params["batch_size"],
         per_device_eval_batch_size=params["batch_size"],
@@ -266,9 +298,11 @@ def objective(trial, args):
         save_strategy="no", logging_strategy="steps", logging_steps=50,
         fp16=torch.cuda.is_available(), report_to="none",
         seed=args.seed + trial.number)
-    trainer = Trainer(model=model, args=targs, train_dataset=train_ds,
+    trainer = TabLossTrainer(model=model, args=targs, train_dataset=train_ds,
+                       loss_config=loss_config, loss_tokenizer=tokenizer,
                       eval_dataset=val_ds, optimizers=(optimizer, scheduler),
-                      callbacks=[TimeCapCallback(args.time_limit), history_cb])
+                       callbacks=[TimeCapCallback(args.time_limit), history_cb])
+    trial.set_user_attr("token_metadata", trainer.token_metadata.manifest())
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     gpu = GPUMonitor(interval=args.gpu_monitor_interval)
@@ -295,6 +329,8 @@ def objective(trial, args):
     val_loss = float(metrics.get("eval_loss", float("inf")))
 
     history = {"trial": trial.number, "params": params,
+               "loss": loss_config.to_dict(),
+               "token_metadata": trainer.token_metadata.manifest(),
                "train_loss_curve": history_cb.train_curve,
                "eval_loss_curve": history_cb.eval_curve,
                "gpu_util_curve": trial.user_attrs.get("gpu_util_curve", []),
@@ -343,6 +379,8 @@ def objective(trial, args):
 
 def main():
     args = parse_args()
+    loss_config = loss_config_from_args(args)
+    validate_loss_cache(args.cache_dir, loss_config)
     try:
         import optuna
     except ImportError:
@@ -359,7 +397,18 @@ def main():
         raise SystemExit(f"HPO data check failed: {e}")
     study = optuna.create_study(study_name=args.study_name, storage=args.storage,
                                 load_if_exists=True, direction="minimize",
-                                pruner=optuna.pruners.MedianPruner(n_warmup_steps=1000))
+                                 pruner=optuna.pruners.MedianPruner(n_warmup_steps=1000))
+    stored_loss = study.user_attrs.get("loss_config")
+    if stored_loss is None and study.trials:
+        stored_loss = LossConfig().to_dict()
+    if stored_loss is not None and stored_loss != loss_config.to_dict():
+        raise ValueError("Study loss configuration differs; use a separate study name per loss ablation")
+    study.set_user_attr("loss_config", loss_config.to_dict())
+    metadata = TokenMetadata.from_tokenizer(tok, loss_config.max_fret).manifest()
+    stored_metadata = study.user_attrs.get("token_metadata")
+    if stored_metadata is not None and stored_metadata != metadata:
+        raise ValueError("Study tokenizer/pitch metadata differs; use a new study name")
+    study.set_user_attr("token_metadata", metadata)
     study.optimize(lambda t: objective(t, args), n_trials=args.trials,
                    timeout=args.timeout)
     print(f"Best value: {study.best_value:.4f} params: {study.best_params}")
@@ -367,6 +416,7 @@ def main():
     os.makedirs(args.output_root, exist_ok=True)
     with open(best_path, "w", encoding="utf-8") as f:
         json.dump({"params": study.best_params, "value": study.best_value,
+                   "loss": loss_config.to_dict(),
                    "study": args.study_name, "init_from": args.init_from,
                    "user_attrs": study.best_trial.user_attrs}, f, indent=2)
     print(f"Wrote {best_path}. Retrain winner on full data with scripts/train_model.py.")

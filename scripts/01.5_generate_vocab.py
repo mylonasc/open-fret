@@ -11,8 +11,8 @@ from tqdm import tqdm
 
 
 def generate_vocab(input_dir="dataset/processed/individual",
-                   output_file="dataset/processed/unique_tokens.json",
-                   train_list=None):
+                    output_file="dataset/processed/unique_tokens.json",
+                    train_list=None, complete_fretboard=False):
     if not os.path.exists(input_dir):
         raise FileNotFoundError(f"Directory {input_dir} not found. Run 01_process.py first.")
     if train_list:
@@ -25,6 +25,12 @@ def generate_vocab(input_dir="dataset/processed/individual",
         print("WARNING: vocab includes validation/test tokens. "
               "For final runs, use --train-list train_files.txt after splitting.")
     unique_tokens = set()
+    if complete_fretboard:
+        # Predefined domain tokens, NOT vocabulary learned from held-out targets.
+        unique_tokens.update(f"TAB_{s}_{f}" for s in range(1, 13) for f in range(25))
+        unique_tokens.update(f"{kind}_{p}" for kind in ("NO", "NF") for p in range(128))
+        unique_tokens.update(f"CAPO_{c}" for c in range(8))
+        unique_tokens.update(f"TS_{t}" for t in range(1, 1921))
     for filename in tqdm(files, desc="Scanning files"):
         file_path = os.path.join(input_dir, filename)
         try:
@@ -49,5 +55,6 @@ if __name__ == "__main__":
     ap.add_argument("--input-dir", default="dataset/processed/individual")
     ap.add_argument("--output", default="dataset/processed/unique_tokens.json")
     ap.add_argument("--train-list", default=None)
+    ap.add_argument("--complete-fretboard", action="store_true")
     a = ap.parse_args()
-    generate_vocab(a.input_dir, a.output, a.train_list)
+    generate_vocab(a.input_dir, a.output, a.train_list, complete_fretboard=a.complete_fretboard)

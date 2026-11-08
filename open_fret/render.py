@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
+import json
+import re
+
 STANDARD_TUNING_STR = "E5 B4 G4 D4 A3 E3"
 
 # General MIDI program number (0-indexed) used for the tab track.
@@ -13,20 +18,79 @@ NYLON_GUITAR_PROGRAM = 24
 # playback lands on concert pitch in AlphaTab.
 SOUNDING_TUNING_STR = "E4 B3 G3 D3 A2 E2"
 
-_DUR_MAP = {
-    1920: ":1", 1440: ":1.", 960: ":2", 720: ":2.",
-    480: ":4", 360: ":4.", 240: ":8", 180: ":8.",
-    120: ":16", 90: ":16.", 60: ":32", 30: ":64",
-}
+@dataclass(frozen=True)
+class DurationPiece:
+    ticks: int
+    denominator: int
+    dots: int = 0
+    tuplet: int = 1
+
+    def effects(self):
+        values = (["d" * self.dots] if self.dots else [])
+        if self.tuplet != 1:
+            values.append(f"tu {self.tuplet}")
+        return "{" + " ".join(values) + "}" if values else ""
+
+
+def _duration_specs():
+    result = {}
+    ratios = {1: 1, 3: 2, 5: 4, 6: 4, 7: 4, 9: 8, 10: 8, 11: 8, 12: 8}
+    for denominator in (-4, -2, 1, 2, 4, 8, 16, 32, 64, 128, 256):
+        # Match AlphaTab 1.3.0's integer arithmetic at its native 960 PPQ.
+        base = int(3840 / denominator) if denominator > 0 else 3840 * -denominator
+        for dots in range(3):
+            dotted = base if dots == 0 else base + (base // 2 if dots == 1 else (base // 4) * 3)
+            for tuplet, ratio in ratios.items():
+                native = dotted * ratio // tuplet
+                if native % 2 or native <= 0:
+                    continue  # Never introduce fractional 480-PPQ ticks.
+                piece = DurationPiece(native // 2, denominator, dots, tuplet)
+                old = result.get(piece.ticks)
+                rank = lambda p: (p.tuplet != 1, p.dots, abs(p.denominator), p.tuplet)
+                if old is None or rank(piece) < rank(old):
+                    result[piece.ticks] = piece
+    return result
+
+
+_DURATION_SPECS = _duration_specs()
 
 
 def _duration_token(delta: int) -> str | None:
-    if delta in _DUR_MAP:
-        return _DUR_MAP[delta]
-    best = min(_DUR_MAP, key=lambda k: abs(k - delta))
-    if abs(best - delta) / max(delta, 1) <= 0.25:
-        return _DUR_MAP[best]
+    """Exact recipe only. Effects belong AFTER the beat, never in ':8.'."""
+    if delta in _DURATION_SPECS:
+        piece = _DURATION_SPECS[delta]
+        return f":{piece.denominator}" + (" " + piece.effects() if piece.effects() else "")
     return None
+
+
+@lru_cache(maxsize=4096)
+def duration_pieces(ticks: int) -> tuple[DurationPiece, ...]:
+    """Exact additive notation; unrepresentable ticks fail, never approximate."""
+    if ticks <= 0 or ticks > 1_000_000:
+        raise ValueError(f"Unsupported duration: {ticks} ticks")
+    if ticks in _DURATION_SPECS:
+        return (_DURATION_SPECS[ticks],)
+    coins = sorted(_DURATION_SPECS, reverse=True)
+    # Emission is bar-bounded (<=1920); bound this public helper too.
+    if ticks > 3840:
+        whole = (ticks - 1920) // 1920
+        remainder = ticks - whole * 1920
+        return (_DURATION_SPECS[1920],) * whole + (duration_pieces(remainder) if remainder else ())
+    counts = [0] + [ticks + 1] * ticks
+    previous = [None] * (ticks + 1)
+    for value in range(1, ticks + 1):
+        for coin in coins:
+            if coin <= value and counts[value - coin] + 1 < counts[value]:
+                counts[value] = counts[value - coin] + 1
+                previous[value] = coin
+    if previous[ticks] is None:
+        raise ValueError(f"Cannot represent exactly {ticks} ticks in AlphaTex at 480 PPQ")
+    pieces = []
+    while ticks:
+        coin = previous[ticks]
+        pieces.append(_DURATION_SPECS[coin])
+        ticks -= coin
+    return tuple(pieces)
 
 
 class TabRenderer:
@@ -50,22 +114,41 @@ class TabRenderer:
         return " ".join(down_octave(t) for t in tuning_str.split())
 
     def to_alphatex(self, tokens, title="open-fret") -> str:
+        """Render attacks exactly; absent final duration defaults to 480 ticks.
+
+        TAB/TS encodes onsets, not independent note ends. Here each onset group
+        sustains until the next group/end tick. Ties preserve attacks when a
+        duration crosses bars or needs multiple notation fragments. Recovering
+        actual independent sustains requires source note identities/durations.
+        """
         if isinstance(tokens, str):
             tokens = tokens.split()
         chords, gaps = self._collect_chords(tokens)
         # Header format mirrors upstream guitartab (vladsavelyev) output:
         # quoted title/track names are required — bare \track is rejected
         # by AlphaTab's importer ("invalid value: 'null'").
-        lines = [f'\\title "{title}"', f"\\tempo {self.tempo}", ".",
+        lines = [f'\\title {json.dumps(str(title), ensure_ascii=False)}', f"\\tempo {self.tempo}", ".",
                  '\\track "Tab"', f"\\instrument {NYLON_GUITAR_PROGRAM}",
                  f"\\tuning {self.sounding_tuning(self.tuning_str)}"]
         body: list[str] = []
+        tick = 0
         for chord_notes, gap in zip(chords, gaps):
-            dur_tok = _duration_token(gap) if gap > 0 else ":4"
-            if dur_tok is None:
-                dur_tok = ":4"
-            body.append(dur_tok)
-            body.append(self.format_chord(chord_notes))
+            if not 0 < gap <= 1_000_000:
+                raise ValueError(f"Unsupported gap: {gap}")
+            remaining, continuation = gap, False
+            while remaining:
+                if tick and tick % 1920 == 0:
+                    body.append("|")
+                segment = min(remaining, 1920 - tick % 1920)
+                for piece in duration_pieces(segment):
+                    notes = chord_notes
+                    if continuation and notes:
+                        notes = [f"-.{note.split('.')[1].split('{')[0]}" for note in notes]
+                    beat = self.format_chord(notes) if notes else "r"
+                    body.append(f":{piece.denominator} {beat}{piece.effects()}")
+                    tick += piece.ticks
+                    remaining -= piece.ticks
+                    continuation = bool(chord_notes)
         lines.append(" ".join(body))
         return "\n".join(lines) + "\n"
 
@@ -80,14 +163,26 @@ class TabRenderer:
             if t.startswith("TS_"):
                 try:
                     pending += int(t.split("_")[1])
-                except ValueError:
-                    continue
+                except ValueError as e:
+                    raise ValueError(f"Invalid time shift: {t}") from e
+                if int(t.split("_")[1]) < 0:
+                    raise ValueError(f"Negative time shift: {t}")
             elif t.startswith("TAB_"):
                 parts = t.split("_")
                 if len(parts) < 3:
-                    continue
+                    raise ValueError(f"Invalid TAB token: {t}")
                 s, f = parts[1], parts[2]
+                if int(s) < 1 or int(f) < 0:
+                    raise ValueError(f"Invalid string/fret: {t}")
                 tech = parts[3] if len(parts) > 3 else ""
+                effect = ""
+                if tech:
+                    if re.fullmatch(r"b\d+", tech):
+                        effect = "{b (0 " + tech[1:] + ")}"
+                    elif tech in ("s", "v"):
+                        effect = "{" + tech + "}"
+                    else:
+                        raise ValueError(f"Unsupported technique: {tech}")
                 if cur and pending > 0:
                     # Gap since previous TAB -> previous chord complete.
                     chords.append(cur)
@@ -95,12 +190,16 @@ class TabRenderer:
                     cur = []
                     pending = 0
                 elif not cur and pending > 0:
-                    # Leading silence before first chord: ignore for duration.
+                    chords.append([])
+                    gaps.append(pending)
                     pending = 0
-                cur.append(f"{f}.{s}{tech}")
+                cur.append(f"{f}.{s}{effect}")
         if cur:
             gaps.append(pending if pending > 0 else 480)
             chords.append(cur)
+        elif pending > 0:
+            chords.append([])
+            gaps.append(pending)
         return chords, gaps
 
     @staticmethod

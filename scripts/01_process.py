@@ -29,10 +29,11 @@ import os
 import random
 import sys
 import traceback
+from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from open_fret.alphatex import AlphaTexParser
+from open_fret.alphatex import AlphaTexParser, PARSER_VERSION, ALPHATAB_PARSER_VERSION
 from open_fret.sequences import SequenceBuilder, AlignedWindower
 
 try:
@@ -46,18 +47,30 @@ MAX_TARGET_TOKENS = 512
 # Reserve one slot for EOS appended later.
 WINDOW_INPUT_BUDGET = MAX_INPUT_TOKENS - 1
 WINDOW_TARGET_BUDGET = MAX_TARGET_TOKENS - 1
+_UPSTREAM_PARSER = None
 
 
 def _process_one(args):
-    file_path, output_dir, extracted_root, seed = args
-    parser = AlphaTexParser()
+    global _UPSTREAM_PARSER
+    file_path, output_dir, extracted_root, seed, backend = args
+    version = PARSER_VERSION
+    if backend == "alphatab":
+        from open_fret.alphatab_parser import AlphaTabParser
+        from multiprocessing.util import Finalize
+        if _UPSTREAM_PARSER is None or _UPSTREAM_PARSER.process.poll() is not None:
+            _UPSTREAM_PARSER = AlphaTabParser()
+            Finalize(_UPSTREAM_PARSER, _UPSTREAM_PARSER.close, exitpriority=10)
+        parser = _UPSTREAM_PARSER
+        version = ALPHATAB_PARSER_VERSION
+    else:
+        parser = AlphaTexParser()
     builder = SequenceBuilder()
     windower = AlignedWindower(max_input_tokens=WINDOW_INPUT_BUDGET,
                                max_target_tokens=WINDOW_TARGET_BUDGET)
     try:
         tracks = parser.parse_file(file_path)
         if not tracks:
-            return 0, f"no tracks: {file_path}"
+            return 0, f"no tracks: {file_path}", {}
         rel_path = os.path.relpath(file_path, extracted_root)
         rng = random.Random(f"{seed}:{rel_path}")
         out_count = 0
@@ -84,20 +97,24 @@ def _process_one(args):
                         "window": w.window_index,
                         "capo": capo,
                         "tuning": w.tuning,
+                        "tempo": track.tempo,
                         "start_tick": w.start_tick,
                         "end_tick": w.end_tick,
                         "file": rel_path,
+                        "parser_version": version,
                     }
                     with open(os.path.join(output_dir, name), "w", encoding="utf-8") as f:
                         json.dump(payload, f)
                     out_count += 1
-        return out_count, ""
+        return out_count, "", getattr(parser, "diagnostics", {})
     except Exception as e:  # noqa: BLE001 - counted and reported
-        return 0, f"{file_path}: {e}\n{traceback.format_exc()}"
+        return 0, f"{file_path}: {e}\n{traceback.format_exc()}", {}
 
 
 def main(extracted_dir="dataset/raw/extracted",
-         processed_dir="dataset/processed/individual", seed=42):
+         processed_dir="dataset/processed/individual", seed=42, workers=None, parser_backend="alphatab"):
+    if os.path.isdir(processed_dir) and os.listdir(processed_dir):
+        raise FileExistsError("Use an empty output directory to avoid mixing stale windows")
     os.makedirs(processed_dir, exist_ok=True)
     all_files: list[str] = []
     for root, _, files in os.walk(extracted_dir):
@@ -107,16 +124,22 @@ def main(extracted_dir="dataset/raw/extracted",
     print(f"Total files found: {len(all_files)}")
     if not all_files:
         print(f"No .tex files under {extracted_dir}; nothing to do.")
-        return
-    num_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
+        raise ValueError("No AlphaTex input files found")
+    all_files.sort()
+    num_workers = workers or min(16, max(1, multiprocessing.cpu_count() // 2))
     print(f"Processing using {num_workers} workers...")
     success = 0
     failures: list[str] = []
+    effects = Counter()
+    skipped_unpitched = skipped_staves = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as ex:
-        jobs = [(f, processed_dir, extracted_dir, seed) for f in all_files]
-        for count, err in tqdm(ex.map(_process_one, jobs), total=len(jobs),
+        jobs = [(f, processed_dir, extracted_dir, seed, parser_backend) for f in all_files]
+        for count, err, diagnostic in tqdm(ex.map(_process_one, jobs, chunksize=16), total=len(jobs),
                                desc="Processing files"):
             success += count
+            effects.update(diagnostic.get("articulations_not_targeted", {}))
+            skipped_unpitched += diagnostic.get("skipped_unpitched_notes", 0)
+            skipped_staves += diagnostic.get("skipped_staves", 0)
             if err:
                 failures.append(err)
     print(f"\nFinished! Successfully wrote {success} windows.")
@@ -127,6 +150,14 @@ def main(extracted_dir="dataset/raw/extracted",
             print(" -", err.splitlines()[0])
         with open(os.path.join(processed_dir, "_failures.log"), "w", encoding="utf-8") as f:
             f.write("\n".join(failures))
+    with open(os.path.join(processed_dir, "_processing_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"parser_version": ALPHATAB_PARSER_VERSION if parser_backend == "alphatab" else PARSER_VERSION,
+                   "seed": seed, "articulations_not_targeted": dict(effects),
+                   "skipped_unpitched_notes": skipped_unpitched, "skipped_staves": skipped_staves,
+                   "source_files": len(all_files), "rejected_files": len(failures),
+                   "windows": success}, f, indent=2)
+    if not success:
+        raise ValueError("No supported windows produced; inspect _failures.log")
 
 
 if __name__ == "__main__":
@@ -135,5 +166,8 @@ if __name__ == "__main__":
     ap.add_argument("--extracted-dir", default="dataset/raw/extracted")
     ap.add_argument("--processed-dir", default="dataset/processed/individual")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--parser-backend", choices=["strict", "alphatab"], default="alphatab")
     a = ap.parse_args()
-    main(extracted_dir=a.extracted_dir, processed_dir=a.processed_dir, seed=a.seed)
+    main(extracted_dir=a.extracted_dir, processed_dir=a.processed_dir, seed=a.seed,
+         workers=a.workers, parser_backend=a.parser_backend)

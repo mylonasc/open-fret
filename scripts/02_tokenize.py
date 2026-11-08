@@ -2,12 +2,12 @@ from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from transformers import PreTrainedTokenizerFast
 import json
 import os
+import argparse
 
-def build_tokenizer():
-    unique_tokens_file = "dataset/processed/unique_tokens.json"
+def build_tokenizer(unique_tokens_file="dataset/processed/unique_tokens.json",
+                    save_dir="dataset/processed/tab_tokenizer"):
     if not os.path.exists(unique_tokens_file):
-        print("unique_tokens.json not found.")
-        return
+        raise FileNotFoundError(f"Vocabulary not found: {unique_tokens_file}")
 
     with open(unique_tokens_file, 'r') as f:
         unique_tokens = json.load(f)
@@ -22,7 +22,8 @@ def build_tokenizer():
     tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
     
     # Export to transformers format
-    save_path = "dataset/processed/tokenizer.json"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "tokenizer.json")
     tokenizer.save(save_path)
     
     # Now wrap it in PreTrainedTokenizerFast for T5 compatibility
@@ -35,8 +36,6 @@ def build_tokenizer():
         mask_token="[MASK]",
     )
     
-    save_dir = "dataset/processed/tab_tokenizer"
-    os.makedirs(save_dir, exist_ok=True)
     fast_tokenizer.save_pretrained(save_dir)
     print(f"Tokenizer (WordLevel) saved to {save_dir}")
 
@@ -49,4 +48,8 @@ def build_tokenizer():
     print(f"Vocab size: {len(fast_tokenizer)}")
 
 if __name__ == "__main__":
-    build_tokenizer()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--vocab", default="dataset/processed/unique_tokens.json")
+    parser.add_argument("--output-dir", default="dataset/processed/tab_tokenizer")
+    args = parser.parse_args()
+    build_tokenizer(args.vocab, args.output_dir)

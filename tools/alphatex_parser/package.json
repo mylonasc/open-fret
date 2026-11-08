@@ -1,0 +1,8 @@
+{
+  "name": "open-fret-alphatex-parser",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@coderline/alphatab": "1.3.0"
+  }
+}

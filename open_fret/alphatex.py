@@ -15,6 +15,9 @@ optional technique suffix such as ``b4``, ``s`` or ``v``.
 Examples: ``0.1``, ``0.1.8``, ``0.1.8.``, ``2.3b4``, ``2.3.8b4``.
 Chords use ``(note note ...)`` with an optional outer ``.D`` duration.
 Rests use ``r`` with optional ``.D``. Duration directives use ``:D``.
+Inline ``.D`` persists, as in AlphaTab. ``{d}``/``{dd}`` dot just that beat.
+Trailing dots and b/s/v suffixes are also supported as legacy dataset extensions.
+Unsupported syntax raises rather than being scanned for plausible sub-tokens.
 """
 
 from __future__ import annotations
@@ -23,6 +26,9 @@ import re
 from dataclasses import dataclass, field
 
 TICKS_PER_QUARTER = 480
+PARSER_VERSION = "alphatex-v2-strict-duration-inheritance"
+ALPHATAB_PARSER_VERSION = "alphatab-1.3.0-midi-duration-v1"
+SUPPORTED_PARSER_VERSIONS = (PARSER_VERSION, ALPHATAB_PARSER_VERSION)
 DEFAULT_TUNING_MIDI = [64, 59, 55, 50, 45, 40]  # E5 B4 G4 D4 A3 E3 (dataset convention) = concert MIDI
 DEFAULT_TEMPO = 120
 
@@ -43,10 +49,18 @@ _OUTER_DURATION_RE = re.compile(r"\.([0-9]+)(\.*)$")
 _MASTER_RE = re.compile(
     r"(?P<dur>:[0-9]+\.*)"
     r"|(?P<chord>\([^\)]+\)(?:\.[0-9]+\.*)?)"
-    r"|(?P<note>[0-9]+\.[0-9]+(?:\.[0-9]+\.*)?[bsv]?[0-9]*)"
+    r"|(?P<note>[0-9]+\.[0-9]+(?:\.[0-9]+)?\.*(?:[bsv][0-9]*)?\.*)"
     r"|(?P<rest>r(?:\.[0-9]+\.*)?)"
     r"|(?P<bar>\|)"
 )
+
+
+class AlphaTexParseError(ValueError):
+    """Unsupported or malformed input; never return a partially parsed track."""
+
+
+class StaleParserDataError(ValueError):
+    """Cached/processed supervision predates the current parser contract."""
 
 
 @dataclass
@@ -83,7 +97,7 @@ def parse_tuning(tuning_str: str) -> list[int]:
     for token in tuning_str.split():
         m = _TUNING_RE.fullmatch(token)
         if not m:
-            continue
+            raise AlphaTexParseError(f"Invalid tuning note: {token!r}")
         name, octave = m.groups()
         midi_numbers.append(int(octave) * 12 + _NOTE_MAP[name])
     return midi_numbers
@@ -91,7 +105,7 @@ def parse_tuning(tuning_str: str) -> list[int]:
 
 def ticks_for_duration(duration: int, dots: int = 0,
                        ticks_per_quarter: int = TICKS_PER_QUARTER) -> int:
-    if duration <= 0:
+    if duration not in (1, 2, 4, 8, 16, 32, 64):
         raise ValueError(f"Invalid duration denominator: {duration}")
     base = int(ticks_per_quarter * (4 / duration))
     total = base
@@ -130,6 +144,9 @@ class AlphaTexParser:
         tracks_raw = content.split("\\track")
         parsed: list[ParsedTrack] = []
         for t_raw in tracks_raw[1:]:
+            # The remainder of the \track line is a name, not beat syntax.
+            # In particular, digits/dots in a title must never become notes.
+            t_raw = t_raw.partition("\n")[2]
             tuning = list(DEFAULT_TUNING_MIDI)
             tuning_match = re.search(r"\\tuning ([^\n\\]+)", t_raw)
             if tuning_match:
@@ -137,32 +154,55 @@ class AlphaTexParser:
                 if parsed_tuning:
                     tuning = parsed_tuning
             events = self._parse_track_body(t_raw)
+            for event in events:
+                if any(not 1 <= n.string <= len(tuning) for n in event.notes):
+                    raise AlphaTexParseError("Note string outside the declared tuning")
             parsed.append(ParsedTrack(tuning=tuning, tempo=tempo, events=events))
         return parsed
 
     def parse_file(self, path: str) -> list[ParsedTrack]:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except (OSError, UnicodeDecodeError):
-            return []
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
         return self.parse_text(content)
 
     def _parse_track_body(self, t_raw: str) -> list[TimedEvent]:
         current_duration = 4
         current_dots = 0
         lines: list[str] = []
+        metadata_seen: set[str] = set()
         for line in t_raw.split("\n"):
             stripped = line.strip()
-            if not stripped or stripped == "." or stripped.startswith("\\"):
+            if not stripped or stripped == ".":
+                continue
+            if stripped.startswith("\\"):
+                # Only non-timing track metadata can be ignored safely.
+                name = stripped.split()[0]
+                if name not in ("\\tuning", "\\instrument", "\\frets", "\\clef"):
+                    raise AlphaTexParseError(f"Unsupported track directive: {stripped!r}")
+                if lines or name in metadata_seen:
+                    raise AlphaTexParseError(f"Repeated or mid-track metadata: {stripped!r}")
+                if name in ("\\instrument", "\\frets") and not re.fullmatch(r"\\\w+\s+\d+", stripped):
+                    raise AlphaTexParseError(f"Unsupported metadata value: {stripped!r}")
+                metadata_seen.add(name)
                 continue
             lines.append(line)
         clean_content = " ".join(lines)
-        clean_content = re.sub(r"\{[^\}]+\}", "", clean_content)
 
         time_tokens: list[TimedEvent] = []
         current_ticks = 0
-        for m in _MASTER_RE.finditer(clean_content):
+        cursor = 0
+        while cursor < len(clean_content):
+            if clean_content[cursor].isspace():
+                cursor += 1
+                continue
+            m = _MASTER_RE.match(clean_content, cursor)
+            if m is None:
+                raise AlphaTexParseError(
+                    f"Unsupported syntax at offset {cursor}: {clean_content[cursor:cursor+60]!r}")
+            cursor = m.end()
+            if cursor < len(clean_content) and not (
+                    clean_content[cursor].isspace() or clean_content[cursor] in "|{"):
+                raise AlphaTexParseError(f"Malformed token near {clean_content[m.start():cursor+30]!r}")
             kind = m.lastgroup
             token = m.group(0).strip()
             if not token:
@@ -175,6 +215,13 @@ class AlphaTexParser:
                 continue
             if kind == "bar":
                 continue
+            # AlphaTex dotted beat effects; all other effects (including tuplets,
+            # ties, repeats and tempo changes) must be reported, not stripped.
+            effect_dots = None
+            effect = re.match(r"\s*\{\s*(d|dd)\s*\}", clean_content[cursor:])
+            if effect:
+                effect_dots = len(effect.group(1))
+                cursor += effect.end()
             if kind == "rest":
                 rm = _REST_RE.match(token)
                 dur = int(rm.group(1)) if rm and rm.group(1) else current_duration
@@ -188,6 +235,10 @@ class AlphaTexParser:
                 # If rest has no explicit duration/dots, inherit directive.
                 if not (rm and (rm.group(1) or rm.group(2))):
                     dur, dots = current_duration, current_dots
+                if rm and rm.group(1):
+                    current_duration, current_dots = dur, 0
+                if effect_dots is not None:
+                    dots = effect_dots
                 current_ticks += ticks_for_duration(dur, dots, self.ticks_per_quarter)
                 continue
             # chord or single note
@@ -208,10 +259,9 @@ class AlphaTexParser:
                 # inner should be "( ... )"
                 inner_content = inner[inner.find("(") + 1: inner.rfind(")")]
                 for part in _split_chord_inner(inner_content):
-                    try:
-                        note, note_dur, note_dots = parse_single_note(part)
-                    except ValueError:
-                        continue
+                    note, note_dur, note_dots = parse_single_note(part)
+                    if note_dur is not None or note_dots:
+                        raise AlphaTexParseError("Chord duration/dots must follow the closing parenthesis")
                     notes.append(note)
                     # Keep first explicit duration if no outer duration.
                     if explicit_dur is None and note_dur is not None:
@@ -221,10 +271,7 @@ class AlphaTexParser:
                     explicit_dur = outer_dur
                     dots = outer_dots
             else:
-                try:
-                    note, note_dur, note_dots = parse_single_note(token)
-                except ValueError:
-                    continue
+                note, note_dur, note_dots = parse_single_note(token)
                 notes = [note]
                 explicit_dur = note_dur
                 dots = note_dots
@@ -236,6 +283,12 @@ class AlphaTexParser:
             # If token had no explicit duration and no trailing dots, inherit directive dots.
             if explicit_dur is None and dots == 0:
                 use_dots = current_dots
+            if explicit_dur is not None:
+                # Like AlphaTab's _currentDuration, inline .D persists until
+                # another inline duration or :D directive changes it.
+                current_duration, current_dots = explicit_dur, 0
+            if effect_dots is not None:
+                use_dots = effect_dots
             actual_ticks = ticks_for_duration(dur, use_dots, self.ticks_per_quarter)
             # Filter invalid strings/frets but keep event if at least one valid note.
             # Validation against tuning length happens in sequence builder.

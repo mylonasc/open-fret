@@ -33,7 +33,8 @@ def split_dataset(input_dir, output_dir, train_ratio=0.8, val_ratio=0.1, seed=42
         return
     t0 = time.time()
     print("Listing input directory...", flush=True)
-    files = sorted(f for f in os.listdir(input_dir) if f.endswith(".json"))
+    files = sorted(f for f in os.listdir(input_dir)
+                   if f.endswith(".json") and f != "_processing_manifest.json")
     print(f"Found {len(files)} JSON files ({time.time()-t0:.1f}s).", flush=True)
     if not files:
         print("No processed JSON files found.")

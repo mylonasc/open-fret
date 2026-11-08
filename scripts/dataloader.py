@@ -12,10 +12,12 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class TabDataset(Dataset):
-    def __init__(self, file_list_path, data_dir, tokenizer, max_length=512):
+    def __init__(self, file_list_path, data_dir, tokenizer, max_length=512,
+                 required_parser_version=None):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.required_parser_version = required_parser_version
         if not os.path.exists(file_list_path):
             raise FileNotFoundError(f"Split file not found: {file_list_path}")
         with open(file_list_path, "r", encoding="utf-8") as f:
@@ -32,6 +34,10 @@ class TabDataset(Dataset):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            versions = ((self.required_parser_version,) if isinstance(self.required_parser_version, str)
+                        else self.required_parser_version)
+            if versions and data.get("parser_version") not in versions:
+                raise ValueError("Obsolete AlphaTex supervision: reprocess into a new data directory")
             midi_tokens = data["midi"]
             tab_tokens = data["tab"]
         except Exception as e:  # noqa: BLE001
@@ -46,11 +52,19 @@ class TabDataset(Dataset):
             padding="max_length", truncation=True,
             return_tensors="pt").input_ids.squeeze()
         labels[labels == self.tokenizer.pad_token_id] = -100
-        return {
+        result = {
             "input_ids": inputs.input_ids.squeeze(),
             "attention_mask": inputs.attention_mask.squeeze(),
             "labels": labels,
         }
+        if self.required_parser_version:
+            from open_fret.token_metadata import MAX_STRINGS, TokenMetadata
+            tuning = data.get("tuning") or TokenMetadata.tuning(midi_tokens[1])
+            if tuning is None or len(tuning) > MAX_STRINGS:
+                raise ValueError("Missing/unsupported tuning")
+            result["loss_tuning"] = torch.tensor(list(tuning) + [-1] * (MAX_STRINGS - len(tuning)))
+            result["loss_capo"] = torch.tensor(data.get("capo", TokenMetadata.capo(midi_tokens[0])))
+        return result
 
 
 def get_dataloader(split, data_dir, tokenizer_path, batch_size=8, max_length=512):

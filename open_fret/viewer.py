@@ -24,6 +24,27 @@ from open_fret.render import TabRenderer
 TICKS_PER_BEAT = 480
 
 
+def renderer_for_input(midi_tokens, tempo=120):
+    """Match generated tab audio to the source window's actual tuning/capo."""
+    if isinstance(midi_tokens, str):
+        midi_tokens = midi_tokens.split()
+    tuning, capo = None, 0
+    for token in midi_tokens[:2]:
+        if token.startswith("TUNING_"):
+            tuning = [int(v) for v in token[7:].split("_")]
+        elif token.startswith("CAPO_"):
+            capo = int(token[5:])
+    if tuning is None:
+        return TabRenderer(tempo=tempo)
+    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    while tuning and tuning[-1] < 0:
+        tuning.pop()
+    if any(p < 0 for p in tuning):
+        raise ValueError("Viewer cannot omit an internal unavailable string")
+    written = " ".join(f"{names[(p + capo) % 12]}{(p + capo) // 12}" for p in tuning)
+    return TabRenderer(tempo=tempo, tuning_str=written)
+
+
 def midi_tokens_to_notes(midi_tokens, default_duration=480):
     """Pair ON/OFF events into notes with absolute ticks.
 
@@ -122,7 +143,7 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
     else:
         raise ValueError("Provide midi_path or midi_tokens.")
 
-    alpha_tex = TabRenderer(tempo=tempo).to_alphatex(tab_tokens, title=title)
+    alpha_tex = renderer_for_input(input_tokens, tempo=tempo).to_alphatex(tab_tokens, title=title)
     pitches = [n["pitch"] for n in midi_tokens_to_notes(input_tokens)]
     return {
         "title": title,

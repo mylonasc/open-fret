@@ -7,6 +7,12 @@ a manifest with tokenizer + data versions. Failures are counted, not silent.
 import json
 import multiprocessing
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from open_fret.alphatex import PARSER_VERSION, SUPPORTED_PARSER_VERSIONS, StaleParserDataError
+from open_fret.token_metadata import MAX_STRINGS, TokenMetadata
 
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -26,6 +32,10 @@ def create_cache(tokenizer_dir="dataset/processed/tab_tokenizer",
             f"Tokenizer not found at {tokenizer_dir}. Run 02_tokenize.py first.")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
     skipped = {"count": 0}
+    with open(train_list, encoding="utf-8") as f:
+        first = next(line.strip() for line in f if line.strip())
+    with open(os.path.join(data_dir, first), encoding="utf-8") as f:
+        parser_version = json.load(f).get("parser_version")
 
     def process_file_list(file_list_path, split):
         if not os.path.exists(file_list_path):
@@ -43,12 +53,24 @@ def create_cache(tokenizer_dir="dataset/processed/tab_tokenizer",
                 try:
                     with open(fpath, "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    if data.get("parser_version") not in SUPPORTED_PARSER_VERSIONS:
+                        raise StaleParserDataError(f"Obsolete parser_version in {fname}; reprocess into a new directory")
+                    if data["parser_version"] != parser_version:
+                        raise StaleParserDataError("Mixed parser versions; rebuild in an empty directory")
                     midi_tokens, tab_tokens = data["midi"], data["tab"]
                     # Upstream windowing reserves EOS; warn if truncation would occur.
                     if len(midi_tokens) + 1 > max_length or len(tab_tokens) + 1 > max_length:
                         skipped["count"] += 1
+                    tuning = data.get("tuning") or TokenMetadata.tuning(midi_tokens[1])
+                    capo = data.get("capo", TokenMetadata.capo(midi_tokens[0]))
+                    if tuning is None or capo is None or len(tuning) > MAX_STRINGS:
+                        raise ValueError("Missing/unsupported source conditioning")
                     yield {"midi_text": " ".join(midi_tokens) + " " + tokenizer.eos_token,
-                           "tab_text": " ".join(tab_tokens) + " " + tokenizer.eos_token}
+                           "tab_text": " ".join(tab_tokens) + " " + tokenizer.eos_token,
+                           "loss_tuning": list(tuning) + [-1] * (MAX_STRINGS - len(tuning)),
+                           "loss_capo": capo}
+                except StaleParserDataError:
+                    raise
                 except Exception as e:  # noqa: BLE001
                     skipped["count"] += 1
                     print(f"Skipping {fname}: {e}")
@@ -67,24 +89,27 @@ def create_cache(tokenizer_dir="dataset/processed/tab_tokenizer",
             [(t if t != tokenizer.pad_token_id else -100) for t in seq]
             for seq in model_inputs["labels"]
         ]
+        model_inputs["loss_tuning"] = examples["loss_tuning"]
+        model_inputs["loss_capo"] = examples["loss_capo"]
         return model_inputs
 
     print("Converting to model-ready tensors (parallel map)...")
     num_cpus = multiprocessing.cpu_count()
-    num_proc = num_cpus if os.name != "nt" else 1
+    num_proc = min(8, num_cpus) if os.name != "nt" else 1
     tokenized_train = train_ds.map(tokenize_function, batched=True,
-                                   num_proc=num_proc, remove_columns=["midi_text", "tab_text"])
+                                   num_proc=num_proc, remove_columns=train_ds.column_names)
     tokenized_val = val_ds.map(tokenize_function, batched=True,
-                               num_proc=num_proc, remove_columns=["midi_text", "tab_text"])
+                                num_proc=num_proc, remove_columns=val_ds.column_names)
     splits = {"train": tokenized_train, "validation": tokenized_val}
     if test_ds is not None:
         splits["test"] = test_ds.map(tokenize_function, batched=True,
-                                     num_proc=num_proc, remove_columns=["midi_text", "tab_text"])
+                                     num_proc=num_proc, remove_columns=test_ds.column_names)
     ds_dict = DatasetDict(splits)
     print(f"Saving cached dataset to {cache_dir}...")
     ds_dict.save_to_disk(cache_dir)
     with open(os.path.join(cache_dir, "cache_manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"tokenizer_dir": tokenizer_dir, "max_length": max_length,
+                   "parser_version": parser_version,
                    "skipped_or_truncated": skipped["count"],
                    "splits": {k: len(v) for k, v in splits.items()}}, f, indent=2)
     print(f"Caching complete. Skipped/truncated: {skipped['count']}.")

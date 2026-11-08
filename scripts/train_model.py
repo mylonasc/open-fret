@@ -28,6 +28,9 @@ from datasets import load_from_disk
 
 from config import get_tiny_tab_config
 from dataloader import TabDataset
+from open_fret.loss_training import (TabLossTrainer, add_loss_arguments,
+                                     loss_config_from_args, validate_loss_cache)
+from open_fret.alphatex import SUPPORTED_PARSER_VERSIONS
 
 try:
     from open_fret.training import load_init_model, resolve_resume_checkpoint
@@ -87,7 +90,7 @@ def select_sample_songs(val_files_path, data_dir, k=5):
             raise ValueError(f"Sample file {name} has empty midi/tab streams.")
         samples.append({"name": os.path.splitext(name)[0],
                         "midi_tokens": list(midi_tokens),
-                        "tab_tokens": list(tab_tokens)})
+                        "tab_tokens": list(tab_tokens), "tempo": data.get("tempo", 120)})
     return samples
 
 
@@ -116,6 +119,7 @@ class TabSampleCallback(TrainerCallback):
         self.max_input_tokens = max_input_tokens
         self.max_new_tokens = max_new_tokens
         self.log_path = log_path
+        self.exported_steps = set()
         self.beams = max(beams, 1)
         self.no_repeat_ngram = no_repeat_ngram or None
         self.tokenizer = tokenizer
@@ -143,13 +147,14 @@ class TabSampleCallback(TrainerCallback):
         os.makedirs(out_dir, exist_ok=True)
         was_training = model.training
         model.eval()
-        renderer = TabRenderer()
         manifest = {"run": self.run_name, "step": step, "epoch": epoch,
                     "eval_metrics": metrics or {}, "songs": []}
         try:
             import torch
             for s in self.samples:
                 try:
+                    from open_fret.viewer import renderer_for_input
+                    renderer = renderer_for_input(s["midi_tokens"], tempo=s.get("tempo", 120))
                     enc = self.tokenizer(
                         " ".join(s["midi_tokens"]),
                         return_tensors="pt", truncation=True,
@@ -183,7 +188,8 @@ class TabSampleCallback(TrainerCallback):
                         f.write(renderer.to_ascii(pred))
                     manifest["songs"].append(
                         {"name": s["name"], "file": base,
-                         "n_pred": len(pred),
+                          "n_pred": len(pred),
+                          "tempo": s.get("tempo", 120),
                          "n_ref": len(s["tab_tokens"])})
                 except Exception as e:  # noqa: BLE001 - per-song isolation
                     self._log(f"Sample export failed for {s.get('name')}: {e}")
@@ -195,8 +201,23 @@ class TabSampleCallback(TrainerCallback):
         with open(os.path.join(out_dir, "manifest.json"),
                   "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
+        from scripts.make_run_viewer import build_run_viewer
+        build_run_viewer(self.output_dir, step=step)
+        self.exported_steps.add(step)
         self._log(f"Step {step:06d} | exported {len(manifest['songs'])} "
                   f"tab samples -> {out_dir}")
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        step = state.global_step
+        if step not in self.exported_steps:
+            self.on_evaluate(args, state, control, metrics={"checkpoint_only": True}, **kwargs)
+        checkpoint = os.path.join(self.output_dir, f"checkpoint-{step}")
+        if os.path.isdir(checkpoint):
+            relative = f"../samples/step-{step:08d}/viewer.html"
+            with open(os.path.join(checkpoint, "viewer.html"), "w", encoding="utf-8") as f:
+                f.write(f'<!doctype html><meta http-equiv="refresh" content="0;url={relative}">'
+                        f'<a href="{relative}">View checkpoint samples</a>')
         return control
 
 
@@ -228,11 +249,19 @@ class TrainLoggerCallback(TrainerCallback):
                     log_str += f"Eval Loss: {logs['eval_loss']:.4f} | "
                 if "learning_rate" in logs:
                     log_str += f"LR: {logs['learning_rate']:.2e} | "
+                for key in ("ce_loss", "pitch_loss", "equivalence_smoothing_delta",
+                            "eval_ce_loss", "eval_pitch_loss", "eval_equivalence_smoothing_delta"):
+                    if key in logs:
+                        log_str += f"{key}: {logs[key]:.5f} | "
                 f.write(log_str + "\n")
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train tiny T5 tab model.")
+    p.add_argument("--optuna-storage", default=None,
+                   help="Optional persistent Optuna storage for this fixed-config full run.")
+    p.add_argument("--optuna-study-name", default=None)
+    add_loss_arguments(p)
     p.add_argument("--tokenizer-dir", default="dataset/processed/tab_tokenizer")
     p.add_argument("--cache-dir", default="dataset/processed/cached_dataset")
     p.add_argument("--data-dir", default="dataset/processed/individual")
@@ -299,6 +328,11 @@ def train(args=None):
     import datetime
     import subprocess
     args = args or parse_args()
+    loss_config = loss_config_from_args(args)
+    if bool(args.optuna_storage) != bool(args.optuna_study_name):
+        raise ValueError("Pass both --optuna-storage and --optuna-study-name")
+    if os.path.exists(args.cache_dir):
+        validate_loss_cache(args.cache_dir, loss_config)
     set_seed(args.seed)
     # Each run gets its own folder; never silently overwrite another run.
     if args.output_dir:
@@ -343,9 +377,11 @@ def train(args=None):
     else:
         print(f"Cache not found at {args.cache_dir}. Falling back to file-by-file loading.")
         train_dataset = TabDataset("dataset/processed/train_files.txt",
-                                   args.data_dir, tokenizer, max_length=args.max_length)
+                                   args.data_dir, tokenizer, max_length=args.max_length,
+                                   required_parser_version=SUPPORTED_PARSER_VERSIONS if loss_config.enabled else None)
         val_dataset = TabDataset("dataset/processed/val_files.txt",
-                                 args.data_dir, tokenizer, max_length=args.max_length)
+                                  args.data_dir, tokenizer, max_length=args.max_length,
+                                  required_parser_version=SUPPORTED_PARSER_VERSIONS if loss_config.enabled else None)
     if len(train_dataset) == 0 or len(val_dataset) == 0:
         raise ValueError("Empty train or validation dataset; check splits and cache.")
 
@@ -386,6 +422,21 @@ def train(args=None):
         EarlyStoppingCallback(early_stopping_patience=10),
         TrainLoggerCallback(args.log_file),
     ]
+    study = trial = None
+    if args.optuna_storage:
+        import optuna
+        from scripts.hpo_optuna import LossHistoryCallback
+        study = optuna.create_study(study_name=args.optuna_study_name,
+                                    storage=args.optuna_storage, load_if_exists=True,
+                                    direction="minimize", pruner=optuna.pruners.NopPruner())
+        recorded_loss = study.user_attrs.get("loss_config")
+        if recorded_loss is not None and recorded_loss != loss_config.to_dict():
+            raise ValueError("Full-run study has a different loss configuration")
+        study.set_user_attr("loss_config", loss_config.to_dict())
+        trial = study.ask()
+        trial.set_user_attr("loss_config", loss_config.to_dict())
+        trial.set_user_attr("run_dir", output_dir)
+        callbacks.append(LossHistoryCallback(trial, os.path.join(output_dir, "loss_components.json")))
     if args.sample_songs and int(args.sample_songs) > 0:
         try:
             samples = select_sample_songs(
@@ -418,12 +469,14 @@ def train(args=None):
                 args.decay_factor))
         optimizers = (optimizer, scheduler)
 
-    trainer = Trainer(
+    trainer = TabLossTrainer(
+        loss_config=loss_config,
+        loss_tokenizer=tokenizer,
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        optimizers=optimizers if use_hpo_schedule else None,
+        optimizers=optimizers,
         callbacks=callbacks,
     )
 
@@ -473,6 +526,10 @@ def train(args=None):
         "data": {"cache_dir": args.cache_dir, "train_size": len(train_dataset),
                  "val_size": len(val_dataset), "manifest": _cache_manifest()},
         "model_init": init_info,
+        "loss": loss_config.to_dict(),
+        "optuna": {"storage": args.optuna_storage, "study": args.optuna_study_name,
+                   "trial": trial.number if trial is not None else None},
+        "token_metadata": trainer.token_metadata.manifest(),
         "hyperparams": {
             "epochs": args.epochs, "max_steps": args.max_steps,
             "batch_size": args.batch_size, "grad_accum": args.grad_accum,
@@ -493,7 +550,19 @@ def train(args=None):
     with open(os.path.join(output_dir, "run.json"), "w", encoding="utf-8") as f:
         json.dump(run_meta, f, indent=2)
 
-    result = trainer.train(resume_from_checkpoint=resume_checkpoint)
+    if trial is not None:
+        trial.set_user_attr("run_config", run_meta)
+    try:
+        result = trainer.train(resume_from_checkpoint=resume_checkpoint)
+    except BaseException:
+        if trial is not None:
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+        raise
+    if trial is not None:
+        if trainer.state.best_metric is None:
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            raise ValueError("Full run ended without a recorded validation objective")
+        study.tell(trial, float(trainer.state.best_metric))
 
     print("Training complete. Saving model artifacts...")
     final_dir = os.path.join(output_dir, "final")

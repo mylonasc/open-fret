@@ -46,6 +46,7 @@ preprocessing lives in `open_fret/` (`alphatex`, `sequences`, `splits`,
 python scripts/00_download.py
 
 # 2. Process AlphaTex into aligned MIDI/tab windows
+npm ci --prefix tools/alphatex_parser  # pinned extended AlphaTab parser
 python scripts/01_process.py
 
 # 3. Split by source song (no leakage across train/val/test)
@@ -96,6 +97,19 @@ python scripts/inference.py --midi path/to/your/song.mid
 python scripts/hpo_optuna.py --trials 20 --storage sqlite:///hpo.db
 # Best config -> models/hpo/best_config.json; retrain via scripts/train_model.py
 ```
+
+### 6. Experimental pitch-aware losses
+
+Training and Optuna support separate opt-in `--pitch-loss-alpha 0.3` and
+`--equivalence-smoothing 0.1` experiments; ordinary CE remains the default.
+**Rebuild processed data/cache first:** inline AlphaTex durations previously
+failed to carry forward, and unsupported syntax was silently skipped. New loss
+experiments reject obsolete/unversioned caches. See
+[the loss integration guide](docs/domain_aware_losses.md) for safe rebuild paths,
+formulas, matched CE controls, resume behavior and verification commands. These
+features have not yet demonstrated a model-quality gain.
+The user-requested [fresh combined-loss full run](docs/full_combined_run.md)
+uses CE weight 0.3, smoothing 0.1 and pitch weight 1, with automatic HTML history.
 
 ---
 
