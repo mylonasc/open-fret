@@ -55,6 +55,9 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=50000,
                    help="Safety step cap per trial; the time limit binds first.")
     p.add_argument("--eval-steps", type=int, default=500)
+    p.add_argument("--gpu-monitor-interval", type=float, default=5.0,
+                   help="Seconds between nvidia-smi utilization polls per trial "
+                        "(0 disables GPU monitoring).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--init-from", default=None,
                    help="Optional pretrained T5 endpoint to fine-tune per trial "
@@ -82,6 +85,7 @@ try:
     from transformers import TrainerCallback as _TC
 
     class TimeCapCallback(_TC):  # noqa: F811
+        """Stop training after ``limit`` seconds (per-trial cap)."""
         def __init__(self, limit):
             self.limit = limit
             self.t0 = time.time()
@@ -126,6 +130,86 @@ def burnin_decay_factor(step, warmup_steps, decay_start_step, decay_factor):
     if step < decay_start_step:
         return 1.0
     return float(decay_factor)
+
+
+class GPUMonitor:
+    """Background nvidia-smi sampler: utilization + memory curve per trial.
+
+    Polls ``nvidia-smi`` every ``interval`` seconds on a daemon thread.
+    No new dependencies; disabled gracefully when no GPU/nvidia-smi exists.
+    """
+
+    def __init__(self, interval=5.0, gpu_index=0):
+        import threading
+        self.interval = interval
+        self.gpu_index = gpu_index
+        self.samples: list = []
+        self._stop = threading.Event()
+        self._thread = None
+        self.enabled = interval > 0 and self._probe()
+
+    def _probe(self):
+        import shutil
+        import subprocess
+        if shutil.which("nvidia-smi") is None:
+            return False
+        try:
+            subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
+                 "--format=csv,noheader,nounits", f"--id={self.gpu_index}"],
+                capture_output=True, text=True, timeout=15, check=True)
+            return True
+        except Exception:
+            return False
+
+    def _poll_once(self):
+        import subprocess
+        import time
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
+                 "--format=csv,noheader,nounits", f"--id={self.gpu_index}"],
+                capture_output=True, text=True, timeout=15, check=True).stdout
+            util_s, mem_s = out.strip().split(",")
+            self.samples.append({"t": round(time.time() - self.t0, 1),
+                                 "util_pct": float(util_s.strip()),
+                                 "mem_mb": float(mem_s.strip())})
+        except Exception:
+            pass
+
+    def start(self):
+        import threading
+        import time
+        if not self.enabled:
+            return
+        self.t0 = time.time()
+        self._stop.clear()
+        self._poll_once()
+
+        def loop():
+            while not self._stop.wait(self.interval):
+                self._poll_once()
+
+        self._thread = threading.Thread(target=loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=self.interval + 5)
+            self._thread = None
+
+    def summary(self):
+        if not self.samples:
+            return {"samples": [], "avg_util_pct": 0.0, "avg_mem_mb": 0.0,
+                    "max_util_pct": 0.0, "max_mem_mb": 0.0, "n": 0}
+        utils = [s["util_pct"] for s in self.samples]
+        mems = [s["mem_mb"] for s in self.samples]
+        return {"samples": self.samples,
+                "avg_util_pct": round(sum(utils) / len(utils), 1),
+                "avg_mem_mb": round(sum(mems) / len(mems), 1),
+                "max_util_pct": max(utils), "max_mem_mb": max(mems),
+                "n": len(self.samples)}
 
 
 def objective(trial, args):
@@ -184,6 +268,8 @@ def objective(trial, args):
                       callbacks=[TimeCapCallback(args.time_limit), history_cb])
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
+    gpu = GPUMonitor(interval=args.gpu_monitor_interval)
+    gpu.start()
     try:
         train_result = trainer.train()
     except RuntimeError as e:
@@ -194,12 +280,23 @@ def objective(trial, args):
                 torch.cuda.empty_cache()
             raise
         raise
+    finally:
+        gpu.stop()
+        gs = gpu.summary()
+        trial.set_user_attr("gpu_util_curve", gs["samples"])
+        trial.set_user_attr("avg_gpu_util_pct", gs["avg_util_pct"])
+        trial.set_user_attr("avg_gpu_mem_mb", gs["avg_mem_mb"])
+        trial.set_user_attr("max_gpu_util_pct", gs["max_util_pct"])
+        trial.set_user_attr("max_gpu_mem_mb", gs["max_mem_mb"])
     metrics = trainer.evaluate()
     val_loss = float(metrics.get("eval_loss", float("inf")))
 
     history = {"trial": trial.number, "params": params,
                "train_loss_curve": history_cb.train_curve,
                "eval_loss_curve": history_cb.eval_curve,
+               "gpu_util_curve": trial.user_attrs.get("gpu_util_curve", []),
+               "avg_gpu_util_pct": trial.user_attrs.get("avg_gpu_util_pct", 0.0),
+               "avg_gpu_mem_mb": trial.user_attrs.get("avg_gpu_mem_mb", 0.0),
                "final_eval": metrics, "val_loss": val_loss}
     with open(os.path.join(out_dir, f"trial_{trial.number}_history.json"),
               "w", encoding="utf-8") as f:
@@ -274,7 +371,8 @@ def main():
     summary_path = os.path.join(args.output_root, "batch_saturation.csv")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write("trial,state,batch_size,grad_accum,eff_batch,lr,"
-                "val_loss,peak_mem_gb,stable,loss_drop_per_step,"
+                "val_loss,peak_mem_gb,avg_gpu_util_pct,avg_gpu_mem_mb,"
+                "stable,loss_drop_per_step,"
                 "train_samples_per_second,oom\n")
         for t in study.trials:
             a = t.user_attrs
@@ -283,7 +381,10 @@ def main():
             f.write(f"{t.number},{t.state.name},{p.get('batch_size')},"
                     f"{p.get('grad_accum')},{eff},{p.get('lr')},"
                     f"{t.value if t.value is not None else ''},"
-                    f"{a.get('peak_mem_gb', '')},{a.get('stable', '')},"
+                    f"{a.get('peak_mem_gb', '')},"
+                    f"{a.get('avg_gpu_util_pct', '')},"
+                    f"{a.get('avg_gpu_mem_mb', '')},"
+                    f"{a.get('stable', '')},"
                     f"{a.get('loss_drop_per_step', '')},"
                     f"{a.get('train_samples_per_second', '')},"
                     f"{a.get('oom', '')}\n")
