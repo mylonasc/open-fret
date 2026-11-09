@@ -1,11 +1,13 @@
 # 🎸 Open-Fret: MIDI to Guitar Tablature Transformer
 
+[![🤗 Hugging Face: open-fret-tab](https://img.shields.io/badge/🤗_Hugging_Face-open--fret--tab-yellow)](https://huggingface.co/mylonasc/open-fret-tab)
+[![Dataset: vldsavelyev/guitar_tab](https://img.shields.io/badge/🤗_Dataset-vldsavelyev%2Fguitar__tab-orange)](https://huggingface.co/datasets/vldsavelyev/guitar_tab)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12 tested](https://img.shields.io/badge/python-3.12%20tested-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Transformers](https://img.shields.io/badge/%F0%9F%A4%97-Transformers-orange)](https://huggingface.co/docs/transformers/index)
 
-**Open-Fret** is a research MIDI-to-guitar-tablature pipeline using a small T5 model inspired by the **Fretting-Transformer** architecture. The current trained model is a development baseline, not a published benchmark or downloadable model release. See the [acceptance and issue ledger](docs/issue_triage.md) for verified scope and remaining work.
+**Open-Fret** is a research MIDI-to-guitar-tablature pipeline using a small T5 model inspired by the **Fretting-Transformer** architecture. The current trained model is a development baseline — downloadable from [Hugging Face](https://huggingface.co/mylonasc/open-fret-tab) with full training info and dataset provenance — not a published benchmark. See the [acceptance and issue ledger](docs/issue_triage.md) for verified scope and remaining work.
 
 ---
 
@@ -25,8 +27,10 @@
 
 A static GitHub Pages page renders a playable, seekable AlphaTab score next to a
 MIDI piano roll, with a predicted/actual fingering toggle. It uses a hand-authored
-synthetic fixture; no corpus audio, reference annotations, model weights, or
-server-side inference are published. Build and hosting details are in
+synthetic fixture; no corpus audio or reference annotations from a corpus are
+published there (model weights are released separately on
+[Hugging Face](https://huggingface.co/mylonasc/open-fret-tab)), and no
+server-side inference runs. Build and hosting details are in
 [docs/pages_demo.md](docs/pages_demo.md).
 
 ---
