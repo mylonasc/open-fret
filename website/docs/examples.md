@@ -12,6 +12,11 @@ the left, predicted tab on the right. Press play, drag the seek bar, or click
 either view; flip **Listen** between Tab and MIDI, and **Predicted / Actual**
 where a reference is available.
 
+Prefer a notebook? [`notebooks/predict_and_view.ipynb`](https://github.com/mylonasc/open-fret/blob/first-working-training-loop/notebooks/predict_and_view.ipynb)
+builds a MIDI phrase from scratch, transcribes it with the released
+checkpoint through the repo's anchored decoder, and renders the actual
+tablature inline — verified end-to-end.
+
 <div className="ofv-provenance">
 Windows from <code>vldsavelyev/guitar_tab</code> — training-data rights are
 not established by the published material (see <a href={useBaseUrl('/docs/dataset')}>Dataset</a>).
