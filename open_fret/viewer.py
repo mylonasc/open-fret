@@ -144,17 +144,18 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
         if isinstance(midi_tokens, str):
             midi_tokens = midi_tokens.split()
         input_tokens = list(midi_tokens)
-        notes = midi_tokens_to_notes(input_tokens)
-        midi_bytes = notes_to_midi_bytes(notes, tempo=tempo)
+        midi_bytes = notes_to_midi_bytes(
+            midi_tokens_to_notes(input_tokens), tempo=tempo)
     else:
         raise ValueError("Provide midi_path or midi_tokens.")
 
+    notes = midi_tokens_to_notes(input_tokens)
     renderer = renderer_for_input(input_tokens, tempo=tempo)
     alpha_tex = renderer.to_alphatex(tab_tokens, title=title)
     reference_alpha_tex = (renderer.to_alphatex(
         reference_tab_tokens, title=f"{title} (actual reference)")
         if reference_tab_tokens is not None else None)
-    pitches = [n["pitch"] for n in midi_tokens_to_notes(input_tokens)]
+    pitches = [n["pitch"] for n in notes]
     bundle = {
         "title": title,
         "tempo": tempo,
@@ -162,11 +163,14 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
         "midi_b64": base64.b64encode(midi_bytes).decode("ascii"),
         "alpha_tex": alpha_tex,
         "input_tokens": input_tokens,
+        # Absolute-tick note identities let the browser piano roll draw the
+        # exact input without reparsing MIDI or guessing durations.
+        "input_notes": notes,
         "tab_tokens": list(tab_tokens),
         "meta": {
             "n_input_tokens": len(input_tokens),
             "n_tab_tokens": len(tab_tokens),
-            "n_input_notes": len(midi_tokens_to_notes(input_tokens)),
+            "n_input_notes": len(notes),
             "pitch_min": min(pitches) if pitches else None,
             "pitch_max": max(pitches) if pitches else None,
         },
@@ -184,6 +188,11 @@ ALPHATAB_JS = ("https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0"
 MIDI_PLAYER_JS = ("https://cdn.jsdelivr.net/combine/npm/tone@14.7.77,"
                   "npm/@magenta/music@1.23.0/es6/core.js,"
                   "npm/focus-visible@5,npm/html-midi-player@1.5.0")
+# Rendering-only piano roll (MIT). Used for the grid, note rectangles and
+# playhead; audio controls remain html-midi-player so they can be wired to
+# the tab transport. Pinned: UMD global names and config are version-specific.
+WAVE_ROLL_JS = ("https://cdn.jsdelivr.net/npm/wave-roll@0.4.0"
+                "/dist/wave-roll.umd.js")
 
 
 def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
@@ -209,6 +218,7 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
         if dist_js is None:
             raise ValueError("dist_js is required when with_deps=True.")
         deps = (f'<script src="{MIDI_PLAYER_JS}"></script>\n'
+                f'<script src="{WAVE_ROLL_JS}"></script>\n'
                 f'<script src="{ALPHATAB_JS}"></script>\n'
                 f"<script>\n{dist_js}\n</script>\n")
     return f"""{deps}<div id="ofv-{uid}" class="ofv-root"></div>

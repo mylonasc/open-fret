@@ -18,6 +18,18 @@ inference is involved after the build.
 | `licenses.html` | Project license plus bundled and runtime components |
 | `demo-manifest.json` | Provenance, note count, and publication flags |
 
+The piano roll is rendered by [WaveRoll](https://github.com/crescent-stdio/wave-roll)
+0.4.0 (`createPianoRoll`, MIT). It supplies the pitch-range view, C-octave
+labels, time grid, zoom/pan and a scrolling playhead; `html-midi-player`
+remains the audio transport so the existing tab transport can drive both.
+It replaced Magenta's `PianoRollSVGVisualizer` (via `html-midi-player`),
+which had no time or pitch axis and stayed blank until playback began.
+Alternatives considered: `@molecule/app-feature-piano-roll-react` needs
+private Molecule peer packages; `react-piano-roll` and `webaudio-pianoroll`
+are unmaintained editor widgets. Among the candidates reviewed, WaveRoll was
+the only maintained, framework-agnostic roll with a documented
+rendering-only factory.
+
 Everything on the page is **hand-authored synthetic material**. The repository's
 training corpus, reference annotations, checkpoints, and generated previews are
 not uploaded.

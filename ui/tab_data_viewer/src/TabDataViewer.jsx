@@ -4,6 +4,92 @@ import { createRoot } from "react-dom/client";
 
 const SOUNDFONT_URL =
   "https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/soundfont/sonivox.sf2";
+const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+function tokensToNotes(tokens) {
+  // Fallback for bundles created before input_notes was added.
+  let time = 0;
+  const open = new Map();
+  const notes = [];
+  for (const token of tokens || []) {
+    const value = String(token);
+    if (value.startsWith("TS_")) {
+      const delta = Number.parseInt(value.slice(3), 10);
+      if (Number.isFinite(delta)) time += delta;
+    } else if (value.startsWith("NO_")) {
+      const pitch = Number.parseInt(value.slice(3), 10);
+      if (!Number.isFinite(pitch)) continue;
+      if (!open.has(pitch)) open.set(pitch, []);
+      open.get(pitch).push(time);
+    } else if (value.startsWith("NF_")) {
+      const pitch = Number.parseInt(value.slice(3), 10);
+      const stack = open.get(pitch);
+      if (stack && stack.length) {
+        notes.push({ start: stack.pop(), end: time, pitch });
+      }
+    }
+  }
+  for (const [pitch, stack] of open.entries()) {
+    for (const start of stack) {
+      notes.push({ start, end: Math.max(time, start + 480), pitch });
+    }
+  }
+  return notes.sort((a, b) => a.start - b.start || a.pitch - b.pitch);
+}
+
+function rollNotes(bundle) {
+  const ticksPerBeat = bundle.ticks_per_beat || 480;
+  const tempo = bundle.tempo || 120;
+  const secondsPerTick = 60 / (tempo * ticksPerBeat);
+  const source =
+    Array.isArray(bundle.input_notes) && bundle.input_notes.length
+      ? bundle.input_notes
+      : tokensToNotes(bundle.input_tokens);
+  return source.map((note) => {
+    const midi = note.pitch;
+    const start = note.start;
+    const end = Number.isFinite(note.end) ? note.end : start + 480;
+    return {
+      midi,
+      time: start * secondsPerTick,
+      ticks: start,
+      name: `${PITCH_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`,
+      pitch: PITCH_NAMES[midi % 12],
+      octave: Math.floor(midi / 12) - 1,
+      velocity: 0.8,
+      duration: Math.max(1, end - start) * secondsPerTick,
+    };
+  });
+}
+
+const PIANO_ROLL_OPTIONS = {
+  showPianoKeys: true,
+  showWaveformBand: false,
+  backgroundColor: 0xffffff,
+  noteColor: 0x4f46e5,
+  playheadColor: 0x0f172a,
+  timeStep: 1,
+  minorTimeStep: 0.25,
+};
+
+function pianoRollOptions(notes) {
+  const pitches = notes.map((n) => n.midi).filter(Number.isFinite);
+  let min = pitches.length ? Math.min(...pitches) : 40;
+  let max = pitches.length ? Math.max(...pitches) : 88;
+  // Keep at least an octave of context so a single-note window is readable.
+  if (max - min < 12) {
+    const pad = Math.ceil((12 - (max - min)) / 2);
+    min -= pad;
+    max += pad;
+  }
+  return {
+    ...PIANO_ROLL_OPTIONS,
+    noteRange: {
+      min: Math.max(0, min - 1),
+      max: Math.min(127, max + 1),
+    },
+  };
+}
 
 const CSS = `
 .ofv { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1c1c1e; max-width: 1400px; }
@@ -25,13 +111,15 @@ const CSS = `
 .ofv-tick { font-size: 12px; color: #64748b; font-variant-numeric: tabular-nums; }
 .ofv-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 12px; }
 @media (max-width: 760px) { .ofv-grid { grid-template-columns: 1fr; } }
-@media (max-width: 760px) { .ofv-grid { grid-template-columns: 1fr; } }
 .ofv-card { border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #fff;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); min-width: 0; }
 .ofv-card h4 { margin: 0; padding: 8px 12px; font-size: 13px; font-weight: 650;
   background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-midi-body { padding: 10px 12px; min-height: 120px; }
 .ofv-midi-body midi-player { width: 100%; }
+.ofv-piano-roll { width: 100%; height: 280px; margin-top: 8px; border: 1px solid #e2e8f0;
+  border-radius: 8px; overflow: hidden; background: #fff; }
+@media (max-width: 760px) { .ofv-piano-roll { height: 210px; } }
 .ofv-card-head { display: flex; align-items: center; justify-content: space-between;
   gap: 8px; padding: 6px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-card-head h4 { margin: 0; padding: 0; background: none; border: none;
@@ -89,6 +177,7 @@ export function TabDataViewer({ bundle }) {
   const tabRenderRef = useRef(null);
   const apiRef = useRef(null);
   const playerRef = useRef(null);
+  const rollRef = useRef(null);
   const trackRef = useRef([]);
   const [ready, setReady] = useState({ midi: false, tab: false });
   const [tabPlaying, setTabPlaying] = useState(false);
@@ -127,35 +216,106 @@ export function TabDataViewer({ bundle }) {
   const addWarn = (m) => setWarn((w) => (w.includes(m) ? w : [...w, m]));
   const uid = bundle._uid || "x";
 
-  // MIDI panel: html-midi-player custom elements (imperative: works on React 18/19)
+  // MIDI panel: html-midi-player supplies compact audio controls; WaveRoll
+  // (createPianoRoll) draws the grid, notes and a scrolling playhead. The
+  // two are synchronized through the player's start/stop events and seek bar.
   useEffect(() => {
     const host = midiWrapRef.current;
     if (!host) return;
     host.innerHTML = "";
     let url = null;
+    let roll = null;
+    let rollFrame = null;
+    let resizeObserver = null;
+    let seekInput = null;
+    let seekChange = null;
+    let cancelled = false;
     try {
       url = b64ToBlobUrl(bundle.midi_b64, "audio/midi");
       const player = document.createElement("midi-player");
       player.setAttribute("src", url);
       player.setAttribute("sound-font", "");
-      player.setAttribute("visualizer", `#ofv-midi-viz-${uid}`);
-      const viz = document.createElement("midi-visualizer");
-      viz.setAttribute("type", "piano-roll");
-      viz.id = `ofv-midi-viz-${uid}`;
+      const rollHost = document.createElement("div");
+      rollHost.className = "ofv-piano-roll";
+      rollHost.setAttribute("role", "img");
+      rollHost.setAttribute("aria-label", "Input MIDI piano roll");
       host.appendChild(player);
-      host.appendChild(viz);
+      host.appendChild(rollHost);
       playerRef.current = player;
-      player.addEventListener("load", () => {
-        // html-midi-player only hands its note sequence to linked visualizers
-        // on play, leaving the piano roll blank until the user presses play.
-        // Prime it on load so the roll is visible immediately.
+
+      const drawPlayhead = () => {
+        rollFrame = null;
+        if (!roll || !player) return;
         try {
-          if (player.noteSequence && viz.noteSequence !== player.noteSequence) {
-            viz.noteSequence = player.noteSequence;
-          }
+          roll.setTime(player.currentTime || 0);
         } catch (_) {}
+      };
+      const startFollow = () => {
+        if (rollFrame != null) return;
+        const tick = () => {
+          rollFrame = null;
+          drawPlayhead();
+          if (player.playing && !cancelled) {
+            rollFrame = window.requestAnimationFrame(tick);
+          }
+        };
+        rollFrame = window.requestAnimationFrame(tick);
+      };
+      const stopFollow = () => {
+        if (rollFrame != null) {
+          window.cancelAnimationFrame(rollFrame);
+          rollFrame = null;
+        }
+        drawPlayhead();
+      };
+      player.addEventListener("start", startFollow);
+      player.addEventListener("loop", startFollow);
+      player.addEventListener("stop", stopFollow);
+
+      player.addEventListener("load", () => {
         setReady((r) => ({ ...r, midi: true }));
+        drawPlayhead();
       });
+
+      // The seek bar lives in the player's open shadow root; no public
+      // seeking event exists, so mirror its input/change events.
+      const seekBar = player.shadowRoot && player.shadowRoot.querySelector(".seek-bar");
+      if (seekBar) {
+        seekInput = () => drawPlayhead();
+        seekChange = () => drawPlayhead();
+        seekBar.addEventListener("input", seekInput);
+        seekBar.addEventListener("change", seekChange);
+      }
+
+      if (window.WaveRoll && window.WaveRoll.createPianoRoll) {
+        const notes = rollNotes(bundle);
+        window.WaveRoll.createPianoRoll(
+          rollHost,
+          notes,
+          pianoRollOptions(notes)
+        ).then((instance) => {
+          if (cancelled) {
+            try { instance.destroy(); } catch (_) {}
+            return;
+          }
+          roll = instance;
+          rollRef.current = instance;
+          try { rollHost._ofvRoll = instance; } catch (_) {}
+          drawPlayhead();
+          resizeObserver = new ResizeObserver(() => {
+            try {
+              instance.resize(rollHost.clientWidth, rollHost.clientHeight);
+            } catch (_) {}
+          });
+          resizeObserver.observe(rollHost);
+        }).catch((err) => {
+          addWarn(`Piano roll failed: ${err}`);
+          console.error(err);
+        });
+      } else {
+        addWarn("WaveRoll failed to load (CDN blocked?). Piano roll disabled.");
+      }
+
       if (player.start === undefined && !customElements.get("midi-player")) {
         addWarn("html-midi-player failed to load (CDN blocked?). MIDI panel disabled.");
       }
@@ -164,6 +324,23 @@ export function TabDataViewer({ bundle }) {
       console.error(err);
     }
     return () => {
+      cancelled = true;
+      if (rollFrame != null) window.cancelAnimationFrame(rollFrame);
+      if (resizeObserver) resizeObserver.disconnect();
+      if (seekInput) {
+        const bar = playerRef.current && playerRef.current.shadowRoot &&
+          playerRef.current.shadowRoot.querySelector(".seek-bar");
+        if (bar) bar.removeEventListener("input", seekInput);
+      }
+      if (seekChange) {
+        const bar = playerRef.current && playerRef.current.shadowRoot &&
+          playerRef.current.shadowRoot.querySelector(".seek-bar");
+        if (bar) bar.removeEventListener("change", seekChange);
+      }
+      try {
+        roll && roll.destroy && roll.destroy();
+      } catch (_) {}
+      rollRef.current = null;
       try {
         playerRef.current && playerRef.current.stop && playerRef.current.stop();
       } catch (_) {}
@@ -498,7 +675,7 @@ export function TabDataViewer({ bundle }) {
       </div>
       <div className="ofv-grid">
         <div className="ofv-card">
-          <h4>Input MIDI — piano roll (click play above, seek in the bar)</h4>
+          <h4>Input MIDI — piano roll (play above; wheel/pinch zooms)</h4>
           <div className="ofv-midi-body">
             {!ready.midi && <div className="ofv-skeleton">Loading MIDI player…</div>}
             <div ref={midiWrapRef} data-uid={uid} />

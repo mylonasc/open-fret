@@ -15,6 +15,7 @@ def test_pages_demo_is_synthetic_and_contains_both_players(tmp_path):
     manifest = build(output)
     page = (output / 'examples/player.html').read_text()
     assert 'alphaTab.min.js' in page
+    assert 'wave-roll' in page
     assert 'html-midi-player' in page
     assert 'Choose predicted or actual tab' in page
     assert 'piano roll' in page
@@ -22,6 +23,7 @@ def test_pages_demo_is_synthetic_and_contains_both_players(tmp_path):
     assert (output / 'examples/example.mid').read_bytes().startswith(b'MThd')
     assert (output / 'examples/predicted.tex').read_text() != (output / 'examples/reference.tex').read_text()
     assert manifest['notes'] == 36
+    assert manifest['piano_roll'] == 'WaveRoll 0.4.0'
     assert not manifest['weights_published'] and not manifest['corpus_examples_published']
     assert json.loads((output / 'demo-manifest.json').read_text())['status'] == 'complete'
     assert 'Facebook, Inc.' in (output / 'licenses.html').read_text()

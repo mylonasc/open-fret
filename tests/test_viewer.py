@@ -58,6 +58,7 @@ def test_build_view_bundle_from_tokens():
     assert raw[:4] == b"MThd"
     assert "\\tempo" in bundle["alpha_tex"] and "\\track" in bundle["alpha_tex"]
     assert bundle["meta"]["n_input_notes"] > 0
+    assert bundle["input_notes"] == midi_tokens_to_notes(d["midi"])
     assert bundle["tab_tokens"] == d["tab"]
     assert "reference_alpha_tex" not in bundle
 
@@ -79,5 +80,6 @@ def test_to_html_contains_mount_points():
     html = to_html(bundle, dist_js="/* fake bundle */")
     assert "ofv-" in html
     assert "alphaTab" in html and "midi-player" in html
+    assert "wave-roll" in html
     assert "/* fake bundle */" in html
     assert "AAA=" in html

@@ -2,16 +2,18 @@
 
 Playable + seekable React viewer for open-fret model I/O pairs (Issue #13).
 
-- **Input:** MIDI notes (played via `html-midi-player` piano-roll).
+- **Input:** MIDI notes (audio via `html-midi-player`, visualization via
+  **WaveRoll**'s `createPianoRoll`).
 - **Output:** predicted TAB tokens rendered by **AlphaTab** (notation + tab,
   audio playback, beat cursor, click-the-score to seek).
 - Embeddable in a web page (`demo/index.html`) or a Jupyter cell via
   `open_fret.viewer.show()`.
 
-## Confirmed CDN endpoints (checked 2026-11-08)
+## Confirmed CDN endpoints (checked 2026-11-09)
 
 - AlphaTab: `https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/alphaTab.min.js`
 - SoundFont: `.../dist/soundfont/sonivox.sf2`
+- WaveRoll: `https://cdn.jsdelivr.net/npm/wave-roll@0.4.0/dist/wave-roll.umd.js`
 - MIDI stack: jsDelivr `combine/` of `tone@14.7.77` +
   `@magenta/music@1.23.0/es6/core.js` + `focus-visible@5` +
   `html-midi-player@1.5.0` (note: `@magenta/music@1.23.2` does **not** exist;
@@ -20,8 +22,14 @@ Playable + seekable React viewer for open-fret model I/O pairs (Issue #13).
 ## Verified API facts (from upstream docs, not guesses)
 
 - `html-midi-player`: `<midi-player src visualizer="#id" sound-font>`,
-  `<midi-visualizer type="piano-roll" id>`, JS `.start()` / `.stop()`,
-  `.currentTime`, `load`/`note`/`start`/`stop` events.
+  JS `.start()` / `.stop()`, `.currentTime`, `.playing`,
+  `load`/`note`/`start`/`stop` events. The seek bar lives in its open
+  shadow root; the viewer mirrors `input`/`change` to the piano roll.
+- WaveRoll: `window.WaveRoll.createPianoRoll(container, notes, options)`
+  resolves to an instance with `setTime(seconds)`, `resize(width, height)`,
+  `destroy()`. Notes are plain objects with `midi`, `time` (seconds),
+  `duration` (seconds), `ticks`, `name`, `pitch`, `octave`, `velocity`.
+  `setTime` keeps the playhead at the left edge and scrolls the roll.
 - AlphaTab UMD exposes `window.alphaTab.AlphaTabApi`; score clicks seek
   natively when the player is enabled. Everything else (mute/solo,
   `playbackSpeed`, tick position, beat events) is **feature-detected** in the

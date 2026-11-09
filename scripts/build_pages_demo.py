@@ -127,7 +127,8 @@ React is bundled; AlphaTab and the MIDI/audio components retain their own licens
         '<title>Open-Fret · Licenses</title><h1>Licenses and notices</h1><pre style="white-space:pre-wrap">'
         + html.escape(own + '\n\n' + third_party) + '</pre></html>', encoding='utf-8')
     manifest = {'status': 'complete', 'provenance': bundle['provenance'], 'notes': len(source),
-                'tempo': 100, 'expected_notes': source, 'weights_published': False,
+                'tempo': 100, 'expected_notes': source, 'piano_roll': 'WaveRoll 0.4.0',
+                'weights_published': False,
                 'corpus_examples_published': False}
     (output / 'demo-manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     return manifest
