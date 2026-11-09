@@ -16,3 +16,7 @@ train_log.txt
 node_modules/
 !tools/alphatex_parser/package.json
 !tools/alphatex_parser/package-lock.json
+!website/package.json
+!website/package-lock.json
+website/build/
+website/.docusaurus/
