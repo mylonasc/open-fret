@@ -6,6 +6,9 @@ import random
 
 
 import re
+import hashlib
+import json
+from pathlib import PurePath
 
 _NEW_SCHEME_RE = re.compile(r"^(.*)__t\d+__c\d+__w\d+\.json$")
 
@@ -32,7 +35,8 @@ def split_by_group(items: list[str], group_ids: list[str],
                    train_ratio: float = 0.8, val_ratio: float = 0.1,
                    seed: int = 42) -> tuple[list[str], list[str], list[str]]:
     """Split items so groups never cross split boundaries."""
-    assert len(items) == len(group_ids)
+    if len(items) != len(group_ids) or not 0 < train_ratio < 1 or not 0 < val_ratio < 1 - train_ratio:
+        raise ValueError("Invalid split groups/ratios")
     groups: dict[str, list[str]] = {}
     for item, gid in zip(items, group_ids):
         groups.setdefault(gid, []).append(item)
@@ -53,6 +57,35 @@ def split_by_group(items: list[str], group_ids: list[str],
         else:
             test.append(item)
     return train, val, test
+
+
+def canonical_family(source):
+    """Conservative named-version grouping, not a fuzzy/common-riff matcher."""
+    name = PurePath(source.replace('\\', '/')).stem.casefold()
+    name = re.sub(r'(?:[_\s-]*(?:\(\d+\)|\[\d+\]|(?:ver(?:sion)?|v)[_\s-]*\d+))+$', '', name)
+    return re.sub(r'[^a-z0-9]+', '', name)
+
+
+def musical_fingerprint(rows):
+    """Full-source unaugmented events, with timing and attack multiplicity.
+
+    Never match short windows/introductory riffs independently of the song.
+    """
+    events = []
+    for row in rows:
+        if row.get('capo', 0):
+            continue
+        tick = row.get('start_tick', 0)
+        track = row.get('track', 0)
+        tuning = tuple(row.get('tuning', []))
+        for token in row['midi']:
+            if token.startswith('TS_'):
+                tick += int(token[3:])
+            elif token.startswith(('NO_', 'NF_')):
+                events.append((track, tick, token[:2], int(token[3:]), tuning))
+    if not events:
+        raise ValueError("Source has no unaugmented musical events")
+    return hashlib.sha256(json.dumps(sorted(events), separators=(',', ':')).encode()).hexdigest()
 
 
 def assert_disjoint(train: list[str], val: list[str], test: list[str],

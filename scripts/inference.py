@@ -28,8 +28,9 @@ def chunk_tokens(tokens, budget=DEFAULT_MAX_INPUT - 2):
 
 
 def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
-                  max_new_tokens=DEFAULT_MAX_OUTPUT, deterministic=True,
-                   capo=0, tuning=None, decoding_mode="anchored", beams=4):
+                   max_new_tokens=DEFAULT_MAX_OUTPUT, deterministic=True,
+                    capo=0, tuning=None, decoding_mode="anchored", beams=4,
+                    instrument=None, return_report=False):
     from transformers import T5ForConditionalGeneration, AutoTokenizer
     from open_fret.midi_io import add_conditioning
     from open_fret.generation import generate_tab
@@ -49,34 +50,33 @@ def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
         raise RuntimeError(f"Could not load model from {model_dir!r}: {e}") from e
     model.eval()
 
-    midi_tokens = midi_to_tokens(midi_path)
-    if not midi_tokens:
-        raise ValueError(f"No notes found in MIDI: {midi_path}")
-    print(f"Input MIDI Tokens: {' '.join(midi_tokens[:30])}... ({len(midi_tokens)} total)")
-
-    chunks = chunk_tokens(midi_tokens, budget=min(max_input_tokens - 3, max_new_tokens - 1))
-    if len(chunks) > 1:
-        print(f"Long input: split into {len(chunks)} windows for full-song coverage.")
-    decoded_all: list[str] = []
-    for chunk in chunks:
-        result = generate_tab(model, tokenizer, add_conditioning(chunk, capo=capo, tuning=tuning),
-                              mode=decoding_mode, beams=beams,
+    from open_fret.midi_io import read_midi_notes
+    from open_fret.inference import transcribe_notes
+    notes, metadata = read_midi_notes(midi_path, instrument=instrument)
+    result = transcribe_notes(model, tokenizer, notes, tuning=tuning, capo=capo,
+                              decoding_mode=decoding_mode, beams=beams,
                               max_input_tokens=max_input_tokens, max_new_tokens=max_new_tokens,
                               stochastic=not deterministic)
-        decoded_all.extend(result.tokens)
-    # Do not run order-only correction: it can destroy the timing guarantees.
-    return " ".join(decoded_all)
+    result['midi'] = metadata
+    return result if return_report else ' '.join(result['corrected_tokens'])
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--midi", type=str, required=True, help="Path to input MIDI file")
+    parser.add_argument("--midi", type=str, help="Path to input MIDI file")
     parser.add_argument("--input", type=str, default=None,
                         help="Alias for --midi (backwards compat with README).")
     parser.add_argument("--model", type=str, default="models/tiny-tab-v1/final",
                         help="Local model dir or HF hub id (e.g. 't5-small' for a "
                              "pretrained baseline, though it won't know TAB tokens).")
     parser.add_argument("--out", type=str, default=None, help="Write token output to file.")
+    parser.add_argument("--raw-out", help="Write uncorrected model tokens separately")
+    parser.add_argument("--report", help="Write source identities, corrections and raw/corrected metrics as JSON")
+    parser.add_argument("--tex-out", help="Write timing/duration-preserving AlphaTex")
+    parser.add_argument("--ascii-out", help="Write aligned ASCII (onset preview, not duration notation)")
+    parser.add_argument("--instrument", type=int, help="MIDI instrument index; required for multiple pitched tracks")
+    parser.add_argument("--capo", type=int, default=0)
+    parser.add_argument("--tuning", type=int, nargs='+', help="Concert MIDI pitches, highest string first")
     parser.add_argument("--stochastic", action="store_true",
                         help="Use sampling instead of deterministic decoding.")
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT)
@@ -92,26 +92,34 @@ def main():
                            max_input_tokens=args.max_input_tokens,
                            max_new_tokens=args.max_new_tokens,
                             deterministic=not args.stochastic,
-                            decoding_mode=args.decoding_mode, beams=args.beams)
+                             decoding_mode=args.decoding_mode, beams=args.beams,
+                             capo=args.capo, tuning=args.tuning, instrument=args.instrument,
+                             return_report=True)
+    import json
+    from open_fret.viewer import renderer_for_input
+    from open_fret.midi_io import add_conditioning
+    renderer = renderer_for_input(add_conditioning([], result['capo'], result['tuning']),
+                                  tempo=result['midi']['tempo'])
+    # Render before writing any success artifacts; unsupported rhythms fail.
+    tex = renderer.to_alphatex_notes(result['correction']['corrected_notes'])
+    ascii_tab = renderer.to_ascii(result['corrected_tokens'])
+    text = ' '.join(result['corrected_tokens'])
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
-            f.write(result)
+            f.write(text)
         print(f"Wrote tokens to {args.out}")
 
-    print("\n--- AlphaTex Output (.tex) ---")
-    try:
-        from tokens_to_tab import tokens_to_alphatex
-        print(tokens_to_alphatex(result))
-    except Exception as e:  # noqa: BLE001
-        print(f"Error generating AlphaTex: {e}")
-
-    print("\n--- ASCII Tablature (Preview) ---")
-    try:
-        from tokens_to_tab import tokens_to_ascii
-        ascii_tab = tokens_to_ascii(result)
-        print("\n".join(line[:200] for line in ascii_tab.split("\n")))
-    except Exception:  # noqa: BLE001
-        pass
+    for path, content in ((args.raw_out, ' '.join(result['raw_tokens'])),
+                          (args.report, json.dumps(result, indent=2)),
+                          (args.tex_out, tex), (args.ascii_out, ascii_tab)):
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+    print(f"Windows: {len(result['windows'])}; corrections: "
+          f"{result['correction']['refingered']} refingered, "
+          f"{result['correction']['inserted']} inserted, {result['correction']['dropped_extra']} dropped")
+    print("\n--- AlphaTex Output (.tex) ---\n" + tex)
+    print("\n--- ASCII Tablature (onset preview) ---\n" + ascii_tab)
     print("--------------------------------------")
 
 

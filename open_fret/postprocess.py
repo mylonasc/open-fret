@@ -1,244 +1,153 @@
-"""Pitch/playability post-processing (Issue #8).
+"""Timed, identity-preserving correction with sustained string occupancy.
 
-Replaces the order-only matcher with a timing-aware corrector that:
-- aligns predictions to target MIDI onsets by musical order,
-- fixes playable fret/string while preserving pitch when possible,
-- inserts missing notes and drops unmatchable extras explicitly,
-- detects simultaneous same-string conflicts within a chord.
+Correction is explicit and separately reported: it is not a raw model metric.
+The interval assignment is bounded search, not a claim of general biomechanics.
 """
-
-from __future__ import annotations
-
 from dataclasses import dataclass, field
+from .events import midi_token_notes, tab_attacks, validate_fingerings
 
 DEFAULT_TUNING = [64, 59, 55, 50, 45, 40]
 MAX_FRET = 24
 
 
-def pitch_from_tab(string: int, fret: int, tuning: list[int] = DEFAULT_TUNING) -> int | None:
-    if 1 <= string <= len(tuning) and fret >= 0:
-        return tuning[string - 1] + fret
-    return None
+def pitch_from_tab(string, fret, tuning=DEFAULT_TUNING):
+    return tuning[string - 1] + fret if 1 <= string <= len(tuning) and fret >= 0 else None
 
 
-def viable_string_fret(target_pitch: int, prefer_string: int | None = None,
-                       tuning: list[int] = DEFAULT_TUNING,
-                       max_fret: int = MAX_FRET) -> tuple[int, int] | None:
-    candidates: list[tuple[int, int]] = []
-    for s in range(1, len(tuning) + 1):
-        f = target_pitch - tuning[s - 1]
-        if 0 <= f <= max_fret:
-            candidates.append((s, f))
-    if not candidates:
-        return None
-    if prefer_string is not None:
-        for s, f in candidates:
-            if s == prefer_string:
-                return (s, f)
-    # Prefer lowest fret (most playable) then lowest string movement.
-    candidates.sort(key=lambda sf: (sf[1], abs(sf[0] - (prefer_string or sf[0]))))
-    return candidates[0]
-
-
-@dataclass
-class ParsedPred:
-    token_index: int
-    string: int
-    fret: int
-    tech: str | None
-    pitch: int | None
-    chord_id: int
+def viable_string_fret(target_pitch, prefer_string=None, tuning=DEFAULT_TUNING, max_fret=MAX_FRET):
+    candidates = [(s, target_pitch - pitch) for s, pitch in enumerate(tuning, 1)
+                  if 0 <= target_pitch - pitch <= max_fret]
+    return min(candidates, key=lambda sf: (sf[0] != prefer_string, sf[1], sf[0])) if candidates else None
 
 
 @dataclass
 class CorrectionReport:
     inserted: int = 0
     pitch_fixed: int = 0
+    refingered: int = 0
     dropped_extra: int = 0
     same_string_conflicts_fixed: int = 0
     unplayable: int = 0
+    raw_notes: int = 0
+    corrected_notes: list[dict] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    sustained_occupancy_enforced: bool = True
 
 
-def _parse_tab_token(token: str) -> tuple[int, int, str | None] | None:
-    if not token.startswith("TAB_"):
-        return None
-    parts = token.split("_")
-    if len(parts) < 3:
-        return None
-    try:
-        s = int(parts[1])
-        f = int(parts[2])
-    except ValueError:
-        return None
-    tech = parts[3] if len(parts) > 3 else None
-    return s, f, tech
-
-
-def _chord_ids(tokens: list[str]) -> list[int]:
-    """Assign chord ids: TABs between TS boundaries share an id."""
-    ids: list[int] = []
-    chord = 0
-    for t in tokens:
-        ids.append(chord)
-        if t.startswith("TS_"):
-            chord += 1
-    return ids
+class CorrectionError(ValueError):
+    def __init__(self, message, report):
+        report.unresolved.append(message)
+        self.report = report
+        super().__init__(message)
 
 
 class NeighborSearchCorrector:
-    def __init__(self, tuning: list[int] | None = None, max_fret: int = MAX_FRET):
-        self.tuning = list(tuning) if tuning else list(DEFAULT_TUNING)
-        self.max_fret = max_fret
+    def __init__(self, tuning=None, max_fret=MAX_FRET, capo=0, max_states=100000):
+        self.tuning = list(tuning) if tuning is not None else list(DEFAULT_TUNING)
+        self.max_fret, self.capo, self.max_states = max_fret, capo, max_states
 
-    def correct(self, pred_tokens: list[str],
-                input_midi_tokens: list[str]) -> tuple[list[str], CorrectionReport]:
-        report = CorrectionReport()
-        target_pitches: list[int] = []
-        for t in input_midi_tokens:
-            if t.startswith("NO_"):
-                try:
-                    target_pitches.append(int(t.split("_")[1]))
-                except ValueError:
-                    continue
-        chord_ids = _chord_ids(pred_tokens)
-        preds: list[ParsedPred] = []
-        for idx, tok in enumerate(pred_tokens):
-            parsed = _parse_tab_token(tok)
-            if parsed is None:
-                continue
-            s, f, tech = parsed
-            pitch = pitch_from_tab(s, f, self.tuning)
-            preds.append(ParsedPred(token_index=idx, string=s, fret=f,
-                                    tech=tech, pitch=pitch, chord_id=chord_ids[idx]))
-
-        output = list(pred_tokens)
-        used: set[int] = set()
-
-        # Align each target onset in order to the nearest unused prediction
-        # within a small window (paper's +/-5), falling back to insertion.
-        for target_idx, target_pitch in enumerate(target_pitches):
-            best = None
-            best_diff = None
-            start = max(0, target_idx - 5)
-            end = min(len(preds), target_idx + 6)
-            # If lengths differ greatly, search all unused.
-            if len(preds) != len(target_pitches):
-                start, end = 0, len(preds)
-            for p_idx in range(start, end):
-                if p_idx in used:
-                    continue
-                p = preds[p_idx]
-                if p.pitch is None:
-                    diff = 10 ** 9
-                else:
-                    diff = abs(p.pitch - target_pitch)
-                if best is None or diff < best_diff:
-                    best = p_idx
-                    best_diff = diff
-                    if diff == 0:
-                        break
-            if best is None:
-                # No unused prediction left: insert.
-                inserted = self._insert_token(target_pitch, None)
-                if inserted is None:
+    def correct(self, pred_tokens, input_midi_tokens, *, source_notes=None):
+        from .token_metadata import TokenMetadata
+        pred_tokens = pred_tokens.split() if isinstance(pred_tokens, str) else list(pred_tokens)
+        midi = input_midi_tokens.split() if isinstance(input_midi_tokens, str) else list(input_midi_tokens)
+        tuning, capo = self.tuning, self.capo
+        for token in midi:
+            if token.startswith("TUNING_"):
+                tuning = TokenMetadata.tuning(token)
+            elif token.startswith("CAPO_"):
+                capo = TokenMetadata.capo(token)
+        if not tuning or capo is None or not 0 <= capo <= 24:
+            raise ValueError("Invalid tuning/capo")
+        source = list(source_notes) if source_notes is not None else midi_token_notes(midi, allow_open=True)
+        source = sorted(source, key=lambda n: (n["start"], n["pitch"], str(n["id"])))
+        if len({n['id'] for n in source}) != len(source):
+            raise ValueError("Duplicate source note identity")
+        if any(n['start'] < 0 or n['end'] <= n['start'] for n in source):
+            raise ValueError("Invalid source note interval")
+        predictions = tab_attacks(pred_tokens)
+        report = CorrectionReport(raw_notes=len(predictions))
+        if any(n.get("duration_policy") for n in source):
+            report.notes.append("Token-only missing releases: explicit end-of-stream/480-tick policy; not original durations")
+        # Exact tick matching, never pitch-order matching across attacks.
+        used, preferred, domains = set(), [], []
+        for note in source:
+            candidates = [i for i, p in enumerate(predictions)
+                          if i not in used and p['start'] == note['start']]
+            def distance(i):
+                p = predictions[i]
+                pitch = pitch_from_tab(p['string'], p['fret'], tuning)
+                return abs((pitch + capo) - note['pitch']) if pitch is not None else 10000
+            match = min(candidates, key=lambda i: (distance(i), i)) if candidates else None
+            preferred.append(predictions[match] if match is not None else None)
+            if match is not None:
+                used.add(match)
+            else:
+                report.inserted += 1
+            domain = [(s, note['pitch'] - base - capo) for s, base in enumerate(tuning, 1)
+                      if 0 <= note['pitch'] - base - capo <= self.max_fret]
+            p = preferred[-1]
+            domain.sort(key=lambda sf: (not p or sf != (p['string'], p['fret']), sf[1], sf[0]))
+            if not domain:
+                report.unplayable += 1
+                raise CorrectionError(f"No legal fingering for note {note['id']} pitch {note['pitch']}", report)
+            domains.append(domain)
+        report.dropped_extra = len(predictions) - len(used)
+        # Iterative DFS across the complete song, not independent per-chord
+        # greedy repair. Backtracking can refinger a preceding sustained note.
+        assigned, choices, index, states = [], [0] * len(source), 0, 0
+        while index < len(source):
+            if states >= self.max_states:
+                raise CorrectionError("Fingering search budget exceeded; no partial output emitted", report)
+            states += 1
+            selected = None
+            while choices[index] < len(domains[index]):
+                s, f = domains[index][choices[index]]
+                choices[index] += 1
+                if not any(old['string'] == s and old['end'] > source[index]['start'] for old in assigned):
+                    selected = {**source[index], 'string': s, 'fret': f, 'tech': None}
+                    break
+            if selected is None:
+                choices[index] = 0
+                if not assigned:
                     report.unplayable += 1
-                    report.notes.append(f"unplayable pitch {target_pitch}")
-                else:
-                    output.append(inserted)
-                    report.inserted += 1
-                continue
-            used.add(best)
-            p = preds[best]
-            if p.pitch != target_pitch:
-                fixed = viable_string_fret(target_pitch, prefer_string=p.string,
-                                           tuning=self.tuning, max_fret=self.max_fret)
-                if fixed is None:
-                    report.unplayable += 1
-                    continue
-                ns, nf = fixed
-                tech_sfx = f"_{p.tech}" if p.tech else ""
-                output[p.token_index] = f"TAB_{ns}_{nf}{tech_sfx}"
-                report.pitch_fixed += 1
-                p.string, p.fret = ns, nf
-                p.pitch = target_pitch
-            # Validate range even when pitch already matched.
-            if not (1 <= p.string <= len(self.tuning) and 0 <= p.fret <= self.max_fret):
-                fixed = viable_string_fret(target_pitch, prefer_string=None,
-                                           tuning=self.tuning, max_fret=self.max_fret)
-                if fixed is None:
-                    report.unplayable += 1
-                else:
-                    ns, nf = fixed
-                    tech_sfx = f"_{p.tech}" if p.tech else ""
-                    output[p.token_index] = f"TAB_{ns}_{nf}{tech_sfx}"
-                    report.pitch_fixed += 1
-
-        # Drop predictions that were never aligned to a target.
-        extra = [i for i in range(len(preds)) if i not in used]
-        # Rebuild output without extras: mark for removal by index.
-        if extra and len(preds) > len(target_pitches):
-            remove_token_idx = {preds[i].token_index for i in extra}
-            output = [t for idx, t in enumerate(output) if idx not in remove_token_idx]
-            report.dropped_extra += len(remove_token_idx)
-            # Re-parse chord ids after removal for conflict detection.
-            chord_ids = _chord_ids(output)
-
-        # Fix simultaneous same-string conflicts within each chord.
-        report.same_string_conflicts_fixed += self._fix_chord_conflicts(output, target_pitches)
+                    raise CorrectionError("No sustained-string assignment for supplied note intervals", report)
+                assigned.pop()
+                index -= 1
+            else:
+                assigned.append(selected)
+                index += 1
+        for note, pred in zip(assigned, preferred):
+            if pred is not None:
+                raw_pitch = pitch_from_tab(pred['string'], pred['fret'], tuning)
+                same_pitch = raw_pitch is not None and raw_pitch + capo == note['pitch']
+                report.pitch_fixed += not same_pitch
+                changed = (note['string'], note['fret']) != (pred['string'], pred['fret'])
+                report.refingered += changed
+                if same_pitch:
+                    note['tech'] = pred['tech']
+                elif pred['tech']:
+                    report.notes.append(f"Dropped pitch-dependent technique on corrected note {note['id']}")
+        for i, p in enumerate(predictions):
+            report.same_string_conflicts_fixed += any(q['start'] == p['start'] and q['string'] == p['string']
+                                                       for q in predictions[:i])
+        validate_fingerings(assigned, tuning, capo, self.max_fret)
+        report.corrected_notes = assigned
+        # Preserve the full source time axis, including note-off-only ticks.
+        by_tick = {}
+        for note in assigned:
+            by_tick.setdefault(note['start'], []).append(note)
+        tick, output = 0, []
+        for time in sorted(set(by_tick) | {n['end'] for n in assigned}):
+            if time > tick:
+                output.append(f"TS_{time - tick}")
+            tick = time
+            for note in by_tick.get(time, []):
+                effect = f"_{note['tech']}" if note.get('tech') else ''
+                output.append(f"TAB_{note['string']}_{note['fret']}{effect}")
         return output, report
-
-    def _insert_token(self, pitch: int, prefer_string: int | None) -> str | None:
-        fixed = viable_string_fret(pitch, prefer_string=prefer_string,
-                                   tuning=self.tuning, max_fret=self.max_fret)
-        if fixed is None:
-            return None
-        s, f = fixed
-        return f"TAB_{s}_{f}"
-
-    def _fix_chord_conflicts(self, tokens: list[str], target_pitches: list[int]) -> int:
-        fixed_count = 0
-        # Group TAB indices by chord.
-        chord_ids = _chord_ids(tokens)
-        by_chord: dict[int, list[int]] = {}
-        for idx, tok in enumerate(tokens):
-            if tok.startswith("TAB_"):
-                by_chord.setdefault(chord_ids[idx], []).append(idx)
-        for chord, indices in by_chord.items():
-            seen: dict[int, int] = {}
-            for tok_idx in indices:
-                parsed = _parse_tab_token(tokens[tok_idx])
-                if parsed is None:
-                    continue
-                s, f, tech = parsed
-                if s in seen:
-                    # Conflict: same string twice in one chord.
-                    pitch = pitch_from_tab(s, f, self.tuning)
-                    alt = None
-                    if pitch is not None:
-                        # Find alternative string producing same pitch.
-                        for cand_s in range(1, len(self.tuning) + 1):
-                            if cand_s == s:
-                                continue
-                            cand_f = pitch - self.tuning[cand_s - 1]
-                            if 0 <= cand_f <= self.max_fret:
-                                alt = (cand_s, cand_f)
-                                break
-                    if alt is not None:
-                        ns, nf = alt
-                        tech_sfx = f"_{tech}" if tech else ""
-                        tokens[tok_idx] = f"TAB_{ns}_{nf}{tech_sfx}"
-                        fixed_count += 1
-                    # else: leave as-is; caller reports unplayable separately.
-                else:
-                    seen[s] = tok_idx
-        return fixed_count
 
 
 def neighbor_search(pred_tokens, input_midi_tokens, tuning=DEFAULT_TUNING):
-    """Backwards-compatible wrapper returning only corrected tokens."""
-    corrector = NeighborSearchCorrector(tuning=list(tuning))
-    midi_list = input_midi_tokens if isinstance(input_midi_tokens, list) else str(input_midi_tokens).split()
-    pred_list = pred_tokens if isinstance(pred_tokens, list) else str(pred_tokens).split()
-    corrected, _ = corrector.correct(pred_list, midi_list)
+    corrected, _ = NeighborSearchCorrector(tuning=tuning).correct(pred_tokens, input_midi_tokens)
     return corrected

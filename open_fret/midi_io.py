@@ -3,41 +3,83 @@
 from __future__ import annotations
 
 
-def midi_file_to_tokens(midi_path: str, target_resolution: int = 480):
+def read_midi_notes(midi_path: str, target_resolution: int = 480, instrument=None):
     """Convert a MIDI file to NO/NF/TS tokens (no CAPO/TUNING prefix).
 
     Imported lazily so preprocessing tests don't require pretty_midi.
     """
-    import pretty_midi
-
-    pm = pretty_midi.PrettyMIDI(midi_path)
-    res_scale = target_resolution / pm.resolution
+    import mido
+    from collections import defaultdict, deque
+    midi = mido.MidiFile(midi_path)
+    if midi.type == 2:
+        raise ValueError("Asynchronous type-2 MIDI is unsupported")
+    scale = target_resolution / midi.ticks_per_beat
+    groups, tempi = {}, {500000}
+    observed_tempi = set()
+    for track_index, track in enumerate(midi.tracks):
+        tick, ordinal, programs = 0, 0, defaultdict(int)
+        active = defaultdict(deque)
+        for msg in track:
+            tick += msg.time
+            if msg.type == 'set_tempo':
+                observed_tempi.add(msg.tempo)
+            elif msg.type == 'program_change':
+                programs[msg.channel] = msg.program
+            elif msg.type == 'control_change' and msg.control == 64 and msg.value >= 64:
+                if msg.channel != 9:
+                    raise ValueError("Sustain-pedal MIDI requires pedal-aware note ends; unsupported")
+            elif msg.type == 'pitchwheel' and msg.pitch and msg.channel != 9:
+                raise ValueError("Pitch-bend MIDI is unsupported by fixed-pitch note alignment")
+            elif msg.type in ('note_on', 'note_off'):
+                if msg.channel == 9:
+                    continue
+                if msg.type == 'note_on' and msg.velocity:
+                    key = (track_index, msg.channel, programs[msg.channel])
+                    note = {'id': f'{track_index}:{msg.channel}:{ordinal}',
+                            'start': int(round(tick * scale)), 'end': None, 'pitch': msg.note}
+                    ordinal += 1
+                    groups.setdefault(key, []).append(note)
+                    active[msg.channel, msg.note].append(note)
+                else:
+                    queue = active[msg.channel, msg.note]
+                    if not queue:
+                        raise ValueError(f"Unmatched MIDI note-off in track {track_index}")
+                    queue.popleft()['end'] = int(round(tick * scale))
+        if any(active.values()):
+            raise ValueError(f"Unterminated MIDI notes in track {track_index}")
+    if len(observed_tempi) > 1:
+        raise ValueError("Variable-tempo MIDI is unsupported by single-tempo tab exports")
+    tempo = next(iter(observed_tempi), 500000)
+    keys = sorted(groups)
+    eligible = list(range(len(keys)))
+    if instrument is None:
+        if len(eligible) > 1:
+            raise ValueError(f"Multiple pitched instruments {eligible}; select --instrument INDEX")
+        selected = eligible
+    else:
+        if instrument not in eligible:
+            raise ValueError(f"Instrument {instrument} has no supported pitched notes")
+        selected = [instrument]
     notes = []
-    for inst in pm.instruments:
-        if not inst.is_drum:
-            notes.extend(inst.notes)
-    if not notes:
-        return []
-    notes.sort(key=lambda n: n.start)
-    events = []
-    for note in notes:
-        start_tick = int(round(pm.time_to_tick(note.start) * res_scale))
-        end_tick = int(round(pm.time_to_tick(note.end) * res_scale))
-        events.append((start_tick, "ON", note.pitch))
-        events.append((end_tick, "OFF", note.pitch))
-    events.sort(key=lambda x: (x[0], 0 if x[1] == "OFF" else 1))
-    tokens: list[str] = []
-    last_time: int | None = None
-    for time, typ, pitch in events:
-        if last_time is None:
-            last_time = time
-        else:
-            delta = time - last_time
-            if delta > 0:
-                tokens.append(f"TS_{delta}")
-                last_time = time
-        tokens.append(f"NO_{pitch}" if typ == "ON" else f"NF_{pitch}")
-    return tokens
+    for i in selected:
+        for note in groups[keys[i]]:
+            if note['end'] <= note['start']:
+                raise ValueError("MIDI note rounds to zero/negative duration at 480 PPQ")
+            notes.append(note)
+    notes.sort(key=lambda n: (n["start"], n["pitch"], n["id"]))
+    return notes, {"tempo": float(mido.tempo2bpm(tempo)), "ticks_per_beat": target_resolution,
+                   "instrument": selected[0] if selected else None,
+                   "instruments": [{'index': i, 'track': key[0], 'channel': key[1], 'program': key[2]}
+                                   for i, key in enumerate(keys)],
+                   "equal_pitch_release_policy": "FIFO within track/channel/pitch",
+                   "drum_policy": "channel 10 ignored",
+                   "ignored_instruments": [i for i in eligible if i not in selected]}
+
+
+def midi_file_to_tokens(midi_path: str, target_resolution: int = 480, instrument=None):
+    from .events import notes_to_tokens
+    notes, _ = read_midi_notes(midi_path, target_resolution, instrument)
+    return notes_to_tokens(notes)
 
 
 def add_conditioning(tokens: list[str], capo: int = 0,

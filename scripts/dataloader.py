@@ -13,11 +13,12 @@ from torch.utils.data import Dataset, DataLoader
 
 class TabDataset(Dataset):
     def __init__(self, file_list_path, data_dir, tokenizer, max_length=512,
-                 required_parser_version=None):
+                  required_parser_version=None, mask_conflicts=True):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.required_parser_version = required_parser_version
+        self.mask_conflicts = mask_conflicts
         if not os.path.exists(file_list_path):
             raise FileNotFoundError(f"Split file not found: {file_list_path}")
         with open(file_list_path, "r", encoding="utf-8") as f:
@@ -42,29 +43,12 @@ class TabDataset(Dataset):
             tab_tokens = data["tab"]
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"Failed loading example {name}: {e}") from e
-        midi_text = " ".join(midi_tokens) + " " + self.tokenizer.eos_token
-        tab_text = " ".join(tab_tokens) + " " + self.tokenizer.eos_token
-        inputs = self.tokenizer(
-            midi_text, max_length=self.max_length,
-            padding="max_length", truncation=True, return_tensors="pt")
-        labels = self.tokenizer(
-            tab_text, max_length=self.max_length,
-            padding="max_length", truncation=True,
-            return_tensors="pt").input_ids.squeeze()
-        labels[labels == self.tokenizer.pad_token_id] = -100
-        result = {
-            "input_ids": inputs.input_ids.squeeze(),
-            "attention_mask": inputs.attention_mask.squeeze(),
-            "labels": labels,
-        }
-        if self.required_parser_version:
-            from open_fret.token_metadata import MAX_STRINGS, TokenMetadata
-            tuning = data.get("tuning") or TokenMetadata.tuning(midi_tokens[1])
-            if tuning is None or len(tuning) > MAX_STRINGS:
-                raise ValueError("Missing/unsupported tuning")
-            result["loss_tuning"] = torch.tensor(list(tuning) + [-1] * (MAX_STRINGS - len(tuning)))
-            result["loss_capo"] = torch.tensor(data.get("capo", TokenMetadata.capo(midi_tokens[0])))
-        return result
+        from open_fret.encoding import encode_window
+        try:
+            return {key: torch.tensor(value) for key, value in encode_window(
+                data, self.tokenizer, self.max_length, self.mask_conflicts).items()}
+        except Exception as e:
+            raise RuntimeError(f"Failed encoding example {name}: {e}") from e
 
 
 def get_dataloader(split, data_dir, tokenizer_path, batch_size=8, max_length=512):

@@ -98,6 +98,46 @@ class TabRenderer:
         self.tempo = tempo
         self.tuning_str = tuning_str
 
+    def to_alphatex_notes(self, notes, title="open-fret"):
+        """Render identity-bearing intervals, including independent sustains.
+
+        Partition at every attack/release and tie continuing notes individually
+        inside chords. A release never reattacks a surviving note. This accepts
+        source-aligned sidecars, not invented note ends from TAB/TS tokens.
+        """
+        from .alphatex import parse_tuning
+        from .events import validate_fingerings
+        notes = list(notes)
+        validate_fingerings(notes, parse_tuning(self.tuning_str))
+        points = sorted({0} | {int(n[k]) for n in notes for k in ('start', 'end')})
+        body, tick = [], 0
+        for start, end in zip(points, points[1:]):
+            active = sorted((n for n in notes if n['start'] <= start < n['end']),
+                            key=lambda n: n['string'])
+            remaining = end - start
+            while remaining:
+                if tick and tick % 1920 == 0:
+                    body.append('|')
+                segment = min(remaining, 1920 - tick % 1920)
+                for piece in duration_pieces(segment):
+                    chord = []
+                    for n in active:
+                        if n['start'] < tick:
+                            chord.append(f"-.{n['string']}")
+                        else:
+                            tech = f"_{n['tech']}" if n.get('tech') else ''
+                            formatted, _ = self._collect_chords([f"TAB_{n['string']}_{n['fret']}{tech}"])
+                            chord.append(formatted[0][0])
+                    beat = self.format_chord(chord) if chord else 'r'
+                    body.append(f":{piece.denominator} {beat}{piece.effects()}")
+                    tick += piece.ticks
+                    remaining -= piece.ticks
+        return '\n'.join([f'\\title {json.dumps(str(title), ensure_ascii=False)}',
+                          f'\\tempo {self.tempo}', '.', '\\track "Tab"',
+                          f'\\instrument {NYLON_GUITAR_PROGRAM}',
+                          f'\\tuning {self.sounding_tuning(self.tuning_str)}',
+                          ' '.join(body)]) + '\n'
+
     @staticmethod
     def sounding_tuning(tuning_str: str) -> str:
         """Written pitch -> sounding pitch (one octave down).
@@ -169,7 +209,7 @@ class TabRenderer:
                     raise ValueError(f"Negative time shift: {t}")
             elif t.startswith("TAB_"):
                 parts = t.split("_")
-                if len(parts) < 3:
+                if len(parts) not in (3, 4):
                     raise ValueError(f"Invalid TAB token: {t}")
                 s, f = parts[1], parts[2]
                 if int(s) < 1 or int(f) < 0:
@@ -194,6 +234,8 @@ class TabRenderer:
                     gaps.append(pending)
                     pending = 0
                 cur.append(f"{f}.{s}{effect}")
+            elif t != '[EOS]':
+                raise ValueError(f"Unsupported tab token: {t}")
         if cur:
             gaps.append(pending if pending > 0 else 480)
             chords.append(cur)
@@ -211,6 +253,7 @@ class TabRenderer:
     def to_ascii(self, tokens) -> str:
         if isinstance(tokens, str):
             tokens = tokens.split()
+        self._collect_chords(tokens)  # validate rather than silently dropping syntax
         strings: dict[int, list[str]] = {i: [] for i in range(1, 7)}
         # Build columns: each onset (chord) is one column across all strings.
         cur_chord: dict[int, str] = {}
@@ -247,6 +290,8 @@ class TabRenderer:
                     flush_chord()
                 pending_dashes += max(1, delta // 60)
             elif t.startswith("TAB_"):
+                if not cur_chord and pending_dashes:
+                    flush_chord()  # leading/inter-onset silence occupies shared columns
                 parts = t.split("_")
                 if len(parts) < 3:
                     continue

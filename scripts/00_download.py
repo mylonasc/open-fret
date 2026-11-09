@@ -1,47 +1,46 @@
+"""Fail-fast dataset download and atomic, traversal-safe extraction."""
+import argparse
+import json
 import os
-from datasets import load_dataset
-from tqdm import tqdm
-import shutil
+from pathlib import Path
+import tempfile
+import zipfile
 
-# Configuration
-DATASET_NAME = "vldsavelyev/guitar_tab"
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dataset", "raw")
+DATASET_NAME = 'vldsavelyev/guitar_tab'
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / 'dataset/raw'
 
-def download_and_save_dataset():
-    """
-    Downloads the guitar_tab dataset from Hugging Face and saves it locally.
-    """
+
+def extract_archive(archive, destination):
+    destination = Path(destination)
+    if destination.exists():
+        raise FileExistsError(f"Extraction destination exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.extract-', dir=destination.parent) as tmp:
+        root = Path(tmp).resolve()
+        with zipfile.ZipFile(archive) as source:
+            bad = source.testzip()
+            if bad:
+                raise ValueError(f"Corrupt archive member: {bad}")
+            for member in source.infolist():
+                path = (root / member.filename).resolve()
+                if not path.is_relative_to(root) or (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ValueError(f"Unsafe archive member: {member.filename}")
+            source.extractall(root)
+        if not any(root.rglob('*.tex')):
+            raise ValueError("Archive contains no AlphaTex files")
+        (root / '_extraction_manifest.json').write_text(json.dumps({'schema_version': 1, 'status': 'complete'}))
+        os.rename(root, destination)
+
+
+def download_and_save_dataset(output_dir=OUTPUT_DIR):
     from huggingface_hub import hf_hub_download
-    import zipfile
+    output_dir = Path(output_dir)
+    archive = hf_hub_download(repo_id=DATASET_NAME, filename='data.zip',
+                              repo_type='dataset', local_dir=str(output_dir))
+    extract_archive(archive, output_dir / 'extracted')
 
-    print(f"Downloading dataset: {DATASET_NAME}...")
-    
-    try:
-        # download data.zip
-        local_zip_path = hf_hub_download(
-            repo_id=DATASET_NAME,
-            filename="data.zip",
-            repo_type="dataset",
-            local_dir=OUTPUT_DIR
-        )
-        
-        print(f"Downloaded zip to {local_zip_path}")
-        
-        # Unzip
-        extract_path = os.path.join(OUTPUT_DIR, "extracted")
-        os.makedirs(extract_path, exist_ok=True)
-        
-        print(f"Extracting to {extract_path}...")
-        with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-            
-        print(f"Download and extraction complete. Data saved to {extract_path}")
-        
-    except Exception as e:
-        import traceback
-        print(f"Error downloading dataset: {e}")
-        traceback.print_exc()
-        print("Please ensure you have internet access and the 'huggingface_hub' library installed.")
 
-if __name__ == "__main__":
-    download_and_save_dataset()
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--output-dir', default=str(OUTPUT_DIR))
+    download_and_save_dataset(ap.parse_args().output_dir)

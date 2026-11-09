@@ -100,6 +100,9 @@ def _process_one(args):
                         "tempo": track.tempo,
                         "start_tick": w.start_tick,
                         "end_tick": w.end_tick,
+                        "notes": w.notes,
+                        "carry_notes": w.carry_notes,
+                        "window_version": w.window_version,
                         "file": rel_path,
                         "parser_version": version,
                     }

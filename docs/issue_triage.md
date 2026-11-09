@@ -1,5 +1,11 @@
 # Baseline acceptance and remaining issues
 
+**Update:** research ablations are deferred by maintainer direction; #12 must
+remain untouched. The identity/duration, full-song, strict encoding and pipeline
+acceptance implementation is documented in [engineering acceptance](engineering_acceptance.md).
+The original ledger below records the initial audit, not the latest closure list;
+GitHub closure comments record each tested batch.
+
 The current trained model is the accepted development starting point, per the
 maintainer's direction. This is not a held-out benchmark, proof of a loss
 improvement, or a public model release. Do not interrupt training, rewrite its

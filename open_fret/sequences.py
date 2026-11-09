@@ -20,6 +20,9 @@ class FlatNote:
     string: int
     fret: int
     tech: str | None = None
+    note_id: str = ""
+    start: int = 0
+    end: int = 0
 
 
 @dataclass
@@ -40,6 +43,9 @@ class SequenceExample:
     end_tick: int = 0
     capo: int = 0
     tuning: list[int] = field(default_factory=list)
+    notes: list[dict] = field(default_factory=list)
+    carry_notes: list[dict] = field(default_factory=list)
+    window_version: str = "aligned-v2-identities"
 
     def to_text_pair(self, eos_token: str = "[EOS]") -> tuple[str, str]:
         midi_text = " ".join(self.midi_tokens) + (" " + eos_token if eos_token else "")
@@ -57,18 +63,23 @@ class SequenceBuilder:
         tuning = track.tuning
         # Map absolute time -> step
         by_time: dict[int, TimedStep] = {}
+        identity = 0
         for event in track.events:
             start = event.start
             duration = event.duration
+            if start < 0 or duration <= 0:
+                raise ValueError("Invalid source note timing")
             for note in event.notes:
                 if note.string < 1 or note.string > len(tuning):
-                    continue
+                    raise ValueError("Invalid source string")
                 if note.fret < 0:
-                    continue
+                    raise ValueError("Invalid source fret")
                 pitch = tuning[note.string - 1] + note.fret + capo
                 step_on = by_time.setdefault(start, TimedStep(time=start))
                 step_on.ons.append(FlatNote(pitch=pitch, string=note.string,
-                                            fret=note.fret, tech=note.tech))
+                                            fret=note.fret, tech=note.tech,
+                                            note_id=str(identity), start=start, end=start + duration))
+                identity += 1
                 end = start + duration
                 step_off = by_time.setdefault(end, TimedStep(time=end))
                 step_off.offs.append(pitch)
@@ -80,16 +91,15 @@ class SequenceBuilder:
         tuning_str = "_".join(map(str, tuning))
         midi_seq = [f"CAPO_{capo}", f"TUNING_{tuning_str}"]
         tab_seq: list[str] = []
-        last_time: int | None = None
+        last_time = 0
         for step in steps:
-            if last_time is None:
-                last_time = step.time
-            else:
-                delta = step.time - last_time
-                if delta > 0:
-                    midi_seq.append(f"TS_{delta}")
-                    tab_seq.append(f"TS_{delta}")
-                last_time = step.time
+            delta = step.time - last_time
+            if delta < 0:
+                raise ValueError("Timed steps must be sorted")
+            if delta > 0:
+                midi_seq.append(f"TS_{delta}")
+                tab_seq.append(f"TS_{delta}")
+            last_time = step.time
             # OFF before ON at same tick is handled by step ordering:
             # emit OFFs first for determinism.
             for pitch in sorted(step.offs):
@@ -146,6 +156,10 @@ class AlignedWindower:
         prefix = [f"CAPO_{capo}", f"TUNING_{tuning_str}"] if self.include_prefix_in_input else []
 
         windows: list[SequenceExample] = []
+        all_notes = [{"id": f"{source}:{track_index}:{n.note_id}", "start": n.start,
+                      "end": n.end, "pitch": n.pitch, "string": n.string,
+                      "fret": n.fret, "tech": n.tech}
+                     for step in steps for n in step.ons]
         cur: list[TimedStep] = []
         cur_ons = 0
         cur_offs = 0
@@ -155,7 +169,7 @@ class AlignedWindower:
             if not cur_steps:
                 return
             # Re-base times to window start for TS computation.
-            t0 = cur_steps[0].time
+            t0 = 0 if window_index == 0 else cur_steps[0].time
             rebased = [TimedStep(time=s.time - t0,
                                  ons=list(s.ons), offs=list(s.offs)) for s in cur_steps]
             builder = SequenceBuilder()
@@ -163,29 +177,25 @@ class AlignedWindower:
                 rebased, tuning, capo=capo)
             # steps_to_tokens always adds prefix; strip if not wanted.
             if not self.include_prefix_in_input:
-                midi_tokens = midi_tokens[0:0]  # no prefix was added with capo? keep simple
-                # Rebuild without prefix manually:
-                midi_tokens, tab_tokens = self._tokens_without_prefix(rebased, tuning, capo)
-            else:
-                # steps_to_tokens already includes prefix
-                pass
+                midi_tokens = midi_tokens[2:]
             # Ensure prefix correctness (steps_to_tokens uses same scheme)
             if self.include_prefix_in_input:
                 midi_tokens = prefix + midi_tokens[2:]
             windows.append(SequenceExample(
                 midi_tokens=midi_tokens, tab_tokens=tab_tokens, source=source,
                 track_index=track_index, window_index=window_index,
-                start_tick=cur_steps[0].time, end_tick=cur_steps[-1].time,
-                capo=capo, tuning=list(tuning)))
-
-        def tokens_without_prefix_needed() -> bool:
-            return not self.include_prefix_in_input
+                start_tick=t0, end_tick=cur_steps[-1].time,
+                capo=capo, tuning=list(tuning),
+                notes=[n for n in all_notes if t0 <= n['start'] <= cur_steps[-1].time],
+                carry_notes=[n for n in all_notes if n['start'] < t0 < n['end']]))
 
         window_index = 0
         for i, step in enumerate(steps):
             add_ons = len(step.ons)
             add_offs = len(step.offs)
             add_gap = 0
+            if not cur and window_index == 0 and step.time > 0:
+                add_gap = 1
             if cur:
                 # Gap needed if time advanced from previous step in window.
                 if step.time != cur[-1].time:
@@ -210,12 +220,13 @@ class AlignedWindower:
                 window_index += 1
                 cur, cur_ons, cur_offs, cur_gaps = [], 0, 0, 0
                 in_len, tgt_len = self._window_cost(0, add_ons, add_offs, prefix_len)
+                add_gap = 0
+            if in_len + 1 > self.max_input_tokens or tgt_len + 1 > self.max_target_tokens:
+                raise ValueError(f"Single timed step at {step.time} exceeds window budget")
             cur.append(step)
             cur_ons += add_ons
             cur_offs += add_offs
             cur_gaps += add_gap
-            # tokens_without_prefix_needed placeholder (kept for clarity)
-            _ = tokens_without_prefix_needed
         flush(cur, window_index)
         return windows
 

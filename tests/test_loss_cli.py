@@ -127,3 +127,16 @@ def test_cpu_fresh_resume_and_reload(fixture_cache):
     inputs = tok("CAPO_0", return_tensors="pt")
     with torch.no_grad():
         assert model.generate(**inputs, max_new_tokens=2).shape[0] == 1
+
+
+def test_cached_uncached_are_identical_and_never_truncated(fixture_cache):
+    from datasets import load_from_disk
+    from scripts.dataloader import TabDataset
+    tok = AutoTokenizer.from_pretrained(fixture_cache / 'tokenizer')
+    rows = TabDataset(str(fixture_cache / 'fixture_files.txt'), str(fixture_cache / 'individual'), tok, 64)
+    cached = load_from_disk(str(fixture_cache / 'cache'))['train']
+    for index in range(len(rows)):
+        assert {k: v.tolist() for k, v in rows[index].items()} == cached[index]
+    tiny = TabDataset(str(fixture_cache / 'fixture_files.txt'), str(fixture_cache / 'individual'), tok, 3)
+    with pytest.raises(RuntimeError, match='never truncate'):
+        tiny[0]
