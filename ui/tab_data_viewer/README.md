@@ -5,6 +5,13 @@ Playable + seekable React viewer for open-fret model I/O pairs (Issue #13).
 - **Single transport:** AlphaTab owns the score clock and audio. One
   Play/Pause button, one seek bar, score click-to-seek and piano-roll
   click-to-seek all move the tab cursor and the roll playhead together.
+- **Listen toggle:** flip between the **Tab** rendering and the **MIDI**
+  rendering of the exact input notes (`midi_alpha_tex` in the bundle). Both
+  play through the same AlphaTab player, so the A/B comparison cannot drift;
+  position is preserved and playback resumes across the flip.
+- **Score cursor:** a green bar (`at-cursor-bar`) tracks the sounding
+  measures plus a beat line and note highlighting — site CSS AlphaTab needs
+  but does not ship.
 - **Input view:** the source MIDI notes drawn by **WaveRoll**'s
   `createPianoRoll` (grid, C-octave labels, zoom/pan, scrolling playhead).
 - **Output view:** predicted TAB tokens rendered by **AlphaTab** (notation +
@@ -25,9 +32,13 @@ Playable + seekable React viewer for open-fret model I/O pairs (Issue #13).
   `playerStateChanged` and `playerPositionChanged` (milliseconds + ticks).
   The tempo selector maps to `playbackSpeed`; the tick grid is
   tempo-independent so the roll stays synced at any tempo. Score clicks seek
-  via `beatMouseDown` → `playbackStart`. Everything else (mute, tick
-  position, beat events) is **feature-detected** in the component — missing
-  APIs degrade to warnings, not crashes.
+  via `beatMouseDown` → `playbackStart`. The Listen toggle swaps the loaded
+  score between the tab AlphaTex and the bundle's pitched MIDI rendering
+  (`midi_alpha_tex`, a `\staff {score}` track with `{t}` ties) via `tex()`,
+  restoring `tickPosition` afterwards — one player, one clock, no MIDI
+  importer needed (the 1.3.0 JS build ships no MIDI importer).
+  Everything else (mute, tick position, beat events) is **feature-detected**
+  in the component — missing APIs degrade to warnings, not crashes.
 - WaveRoll: `window.WaveRoll.createPianoRoll(container, notes, options)`
   resolves to an instance with `setTime(seconds)`, `resize(width, height)`,
   `destroy()`. Notes are plain objects with `midi`, `time` (seconds),

@@ -126,7 +126,9 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
     input token stream). ``tab_tokens`` is the predicted TAB token stream.
     ``reference_tab_tokens`` is optional ground truth (e.g. a validation
     window's reference); when supplied, viewers expose a predicted/actual
-    toggle backed by two independently rendered scores.
+    toggle backed by two independently rendered scores. The bundle also
+    carries a pitched rendering of the exact input notes (``midi_alpha_tex``)
+    so viewers can A/B the tab against the input through one player.
     """
     from open_fret.midi_io import midi_file_to_tokens
 
@@ -155,6 +157,9 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
     reference_alpha_tex = (renderer.to_alphatex(
         reference_tab_tokens, title=f"{title} (actual reference)")
         if reference_tab_tokens is not None else None)
+    # Pitched rendering of the exact input notes: the viewer's Listen toggle
+    # plays this through the same AlphaTab player as the tab (no 2nd clock).
+    midi_alpha_tex = renderer.to_alphatex_midi(notes, title=f"{title} (input MIDI)")
     pitches = [n["pitch"] for n in notes]
     bundle = {
         "title": title,
@@ -162,6 +167,7 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
         "ticks_per_beat": TICKS_PER_BEAT,
         "midi_b64": base64.b64encode(midi_bytes).decode("ascii"),
         "alpha_tex": alpha_tex,
+        "midi_alpha_tex": midi_alpha_tex,
         "input_tokens": input_tokens,
         # Absolute-tick note identities let the browser piano roll draw the
         # exact input without reparsing MIDI or guessing durations.

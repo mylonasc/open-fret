@@ -71,7 +71,8 @@ def main(url=None):
         state = lambda: page.evaluate(
             "() => ({seek: document.querySelector('.ofv-seek').value,"
             " roll: document.querySelector('.ofv-piano-roll')._ofvRoll.getState().currentTime,"
-            " tick: document.querySelector('.ofv-tab-render')._ofvApi.tickPosition})")
+            " tick: document.querySelector('.ofv-tab-render')._ofvApi.tickPosition,"
+            " head: document.querySelector('.ofv-card-head h4').textContent})")
 
         page.click("text=▶ Play")
         page.wait_for_timeout(4000)
@@ -81,6 +82,50 @@ def main(url=None):
               f"{s0}")
         check("play button shows pause",
               page.evaluate("() => [...document.querySelectorAll('.ofv-transport button')].some(b=>b.textContent.includes('⏸ Pause'))"))
+        check("green playback cursor tracks the score",
+              page.evaluate("() => { const e = document.querySelector('.ofv-tab-render .at-cursor-bar');"
+                           " return e && getComputedStyle(e).backgroundColor.includes('34, 197, 94'); }"))
+
+        # Listen toggle: pause + seek to 25% first (deterministic), flip to the
+        # input MIDI (same player, position kept, stays paused), flip back to
+        # the tab, then flip mid-playback to cover resume.
+        page.click("text=⏸ Pause")
+        page.wait_for_timeout(500)
+        target25 = page.evaluate("() => Number(document.querySelector('.ofv-seek').max) * 0.25")
+        page.eval_on_selector(".ofv-seek", """(el, v) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          setter.call(el, String(v));
+          el.dispatchEvent(new Event("input", {bubbles: true}));
+        }""", target25)
+        page.wait_for_timeout(800)
+        page.evaluate("""() => { const b=[...document.querySelectorAll('.ofv-mode button')]
+          .find(x=>x.textContent.trim()==='MIDI'); b&&b.click(); }""")
+        page.wait_for_timeout(3000)
+        sm = state()
+        check("Listen MIDI shows the MIDI score",
+              "Input MIDI" in sm["head"], f"{sm}")
+        check("Listen flip preserves position while paused",
+              abs(float(sm["seek"]) - target25) < 0.5 and sm["tick"] > 0, f"target={target25:.2f} {sm}")
+        check("MIDI score still renders notation",
+              page.evaluate("() => document.querySelectorAll('.ofv-root svg').length") > 0)
+        page.evaluate("""() => { const b=[...document.querySelectorAll('.ofv-tab-controls .ofv-mode')[0].querySelectorAll('button')]
+          .find(x=>x.textContent.trim()==='Tab'); b&&b.click(); }""")
+        page.wait_for_timeout(3000)
+        st = state()
+        check("Listen flip back restores the tab score",
+              "tab" in st["head"].lower() and abs(float(st["seek"]) - target25) < 0.5, f"{st}")
+        page.click("text=▶ Play")
+        page.wait_for_timeout(1500)
+        page.evaluate("""() => { const b=[...document.querySelectorAll('.ofv-mode button')]
+          .find(x=>x.textContent.trim()==='MIDI'); b&&b.click(); }""")
+        page.wait_for_timeout(3000)
+        sr = state()
+        check("Listen flip mid-playback resumes in sync",
+              abs(float(sr["roll"]) - float(sr["seek"])) < 0.8 and float(sr["seek"]) > target25,
+              f"{sr}")
+        page.evaluate("""() => { const b=[...document.querySelectorAll('.ofv-tab-controls .ofv-mode')[0].querySelectorAll('button')]
+          .find(x=>x.textContent.trim()==='Tab'); b&&b.click(); }""")
+        page.wait_for_timeout(2000)
 
         # slider seek: pause first for a deterministic assertion, use the
         # native value setter so React's tracker fires. Seek to 60% of the
@@ -100,10 +145,10 @@ def main(url=None):
               abs(float(s1["seek"]) - target) < 0.3 and abs(float(s1["roll"]) - target) < 0.4,
               f"target={target:.2f} {s1}")
 
-        page.click("text=Mute tab")
+        page.click("text=🔇 Mute")
         check("mute toggles",
-              page.evaluate("() => document.body.innerText.includes('Unmute tab')"))
-        page.click("text=Unmute tab")
+              page.evaluate("() => document.body.innerText.includes('Unmute')"))
+        page.click("text=🔈 Unmute")
 
         # score click-to-seek moves the same shared position
         page.click("button[title='Stop and return to the start']")

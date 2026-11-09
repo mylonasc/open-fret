@@ -23,6 +23,11 @@ The piano roll is rendered by [WaveRoll](https://github.com/crescent-stdio/wave-
 labels, time grid, zoom/pan and a scrolling playhead. AlphaTab is the single
 audio source and clock: its `tickPosition` drives the transport seek bar, the
 tab cursor and the roll playhead together, so the views cannot drift apart.
+A green playback bar tracks the sounding measures (site CSS AlphaTab needs
+but does not ship). A Listen toggle flips the loaded score between the tab
+and a pitched rendering of the exact input notes carried in the bundle
+(`midi_alpha_tex`), so the fingering can be A/B-compared against the input
+through the same player with the position preserved.
 It replaced Magenta's `PianoRollSVGVisualizer` (previously used via
 `html-midi-player`), which had no time or pitch axis and stayed blank until
 playback began.

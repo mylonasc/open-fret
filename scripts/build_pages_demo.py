@@ -90,8 +90,11 @@ footer { color:#64748b; font-size:14px; } .ofv { max-width:none; }
 AlphaTab notation on the right, both driven by one transport. No Python server, GPU or model runs in your browser.</p>
 <p class="notice"><strong>Try it:</strong> press <strong>▶ Play</strong>, drag the
 <strong>seek</strong> bar, or click the score or the piano roll — tab and roll
-stay in sync on one transport. Switch <strong>Predicted / Actual</strong> to
-see two pitch-equivalent fingerings; the seek position survives the switch.</p>
+stay in sync on one transport, with a green bar tracking the sounding measures.
+Flip <strong>Listen</strong> between <strong>Tab</strong> and <strong>MIDI</strong>
+to A/B the fingering against the input through the same player. Switch
+<strong>Predicted / Actual</strong> to see two pitch-equivalent fingerings;
+the seek position survives the switch.</p>
 <div class="viewer">''' + viewer + '''</div>
 <h2>What this example proves</h2>
 <p>GitHub Pages can serve both the piano roll and playable AlphaTab, including the

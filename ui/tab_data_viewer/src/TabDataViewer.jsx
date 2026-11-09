@@ -210,6 +210,12 @@ const CSS = `
 .ofv-tab-scroll { overflow: auto; max-height: 70vh; min-height: 200px; max-width: 100%;
   resize: vertical; }
 .ofv-tab-render { width: 100%; min-width: 0; }
+/* AlphaTab playback cursor: a green bar over the sounding measures plus a
+   thin beat line. AlphaTab adds these divs itself (enableCursor); without
+   site CSS they are invisible, which is why the tab showed no progress. */
+.ofv-tab-render .at-cursor-bar { background: rgba(34, 197, 94, 0.30); }
+.ofv-tab-render .at-cursor-beat { background: rgba(21, 128, 61, 0.95); width: 3px; }
+.ofv-tab-render .at-highlight * { fill: #16a34a; stroke: #16a34a; }
 .ofv-skeleton { padding: 24px; color: #94a3b8; font-size: 13px; text-align: center;
   background: repeating-linear-gradient(45deg, #f8fafc, #f8fafc 10px, #f1f5f9 10px, #f1f5f9 20px); }
 .ofv-tokens { margin-top: 10px; }
@@ -242,7 +248,9 @@ export function TabDataViewer({ bundle }) {
   const [ready, setReady] = useState({ tab: false, player: false, roll: false });
   const [tabPlaying, setTabPlaying] = useState(false);
   const [tabMode, setTabMode] = useState("predicted");
+  const [audioMode, setAudioMode] = useState("tab");
   const pendingTickRef = useRef(null);
+  const resumeRef = useRef(false);
   const hasReference = Boolean(bundle.reference_alpha_tex);
   const activeTabMode = tabMode === "actual" && hasReference ? "actual" : "predicted";
   const activeTex = activeTabMode === "actual" ? bundle.reference_alpha_tex : bundle.alpha_tex;
@@ -537,8 +545,11 @@ export function TabDataViewer({ bundle }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabPlaying]);
 
-  // Swap the score when the user toggles predicted/actual, keeping the same
-  // player so playback/seeking survives the switch.
+  // Swap the score when the user toggles predicted/actual or flips the
+  // Listen source between tab and MIDI, keeping the same player so
+  // playback/seeking survives the switch. The MIDI score is a pitched
+  // rendering of the exact input notes (no second player/clock).
+  const scoreKey = audioMode === "midi" ? `midi:${bundle.title}` : activeTex;
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
@@ -546,14 +557,23 @@ export function TabDataViewer({ bundle }) {
       if (api.settings && api.settings.display) {
         api.settings.display.scale = zoomRef.current;
       }
-      api.tex(activeTex);
+      if (audioMode === "midi") {
+        if (!bundle.midi_alpha_tex) {
+          throw new Error("This bundle has no input-MIDI rendering (rebuild it).");
+        }
+        api.tex(bundle.midi_alpha_tex);
+      } else {
+        api.tex(activeTex);
+      }
     } catch (err) {
       addWarn(`AlphaTab failed to render this score: ${err}`);
+      if (audioMode === "midi") setAudioMode("tab");
       return;
     }
 
     const target = pendingTickRef.current;
     if (target == null) {
+      resumeRef.current = false;
       refreshDuration();
       return;
     }
@@ -592,6 +612,7 @@ export function TabDataViewer({ bundle }) {
             syncRoll(scoreTickToSeconds(target, bundle));
             pendingTickRef.current = null;
             stop();
+            finishRestore();
           }
         } catch (_) {}
       }, 400);
@@ -610,8 +631,23 @@ export function TabDataViewer({ bundle }) {
       listen(name, verify);
     }
     pollTimer = setInterval(verify, 250);
+    const finishRestore = () => {
+      // One-click A/B: if playback was running before the switch, resume it
+      // once the new score holds its position.
+      if (resumeRef.current) {
+        resumeRef.current = false;
+        try {
+          const api = apiRef.current;
+          if (api && typeof api.play === "function") {
+            api.play();
+            setTabPlaying(true);
+          }
+        } catch (_) {}
+      }
+    };
     giveUpTimer = setTimeout(() => {
       pendingTickRef.current = null;
+      resumeRef.current = false;
       stop();
     }, 15000);
     return () => {
@@ -621,7 +657,7 @@ export function TabDataViewer({ bundle }) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTex, bundle.title]);
+  }, [scoreKey, bundle.title]);
 
   const togglePlay = () => {
     const api = apiRef.current;
@@ -653,6 +689,10 @@ export function TabDataViewer({ bundle }) {
     seekTo(Number(event.target.value));
   };
   const switchTabMode = (mode) => {
+    if (audioMode === "midi") {
+      // Choosing a fingering implies listening to the tab again.
+      switchAudioMode("tab");
+    }
     if (mode === activeTabMode || (mode === "actual" && !hasReference)) return;
     try {
       pendingTickRef.current =
@@ -662,16 +702,44 @@ export function TabDataViewer({ bundle }) {
     } catch (_) {
       pendingTickRef.current = scoreSecondsToTick(pos, bundle);
     }
+    resumeRef.current = tabPlaying;
     try {
       const api = apiRef.current;
       if (api) {
-        if (!tabPlaying && typeof api.pause === "function") api.pause();
+        if (typeof api.pause === "function") api.pause();
         else if (api.stop) api.stop();
       }
     } catch (_) {}
     setTabPlaying(false);
     setReady((r) => ({ ...r, tab: false }));
     setTabMode(mode);
+  };
+  const hasMidiTex = Boolean(bundle.midi_alpha_tex);
+  const switchAudioMode = (mode) => {
+    if (mode === audioMode) return;
+    if (mode === "midi" && !hasMidiTex) {
+      addWarn("This bundle has no input-MIDI rendering (rebuild it).");
+      return;
+    }
+    try {
+      pendingTickRef.current =
+        apiRef.current && typeof apiRef.current.tickPosition === "number"
+          ? apiRef.current.tickPosition
+          : scoreSecondsToTick(pos, bundle);
+    } catch (_) {
+      pendingTickRef.current = scoreSecondsToTick(pos, bundle);
+    }
+    resumeRef.current = tabPlaying;
+    try {
+      const api = apiRef.current;
+      if (api) {
+        if (typeof api.pause === "function") api.pause();
+        else if (api.stop) api.stop();
+      }
+    } catch (_) {}
+    setTabPlaying(false);
+    setReady((r) => ({ ...r, tab: false }));
+    setAudioMode(mode);
   };
   const toggleMute = () => {
     const api = apiRef.current;
@@ -759,9 +827,9 @@ export function TabDataViewer({ bundle }) {
           className="ofv-btn"
           onClick={toggleMute}
           disabled={!ready.tab}
-          title="Mute/unmute the tab track for A/B listening"
+          title="Mute/unmute the sounding score for A/B listening"
         >
-          {muted ? "🔈 Unmute tab" : "🔇 Mute tab"}
+          {muted ? "🔈 Unmute" : "🔇 Mute"}
         </button>
         <label className="ofv-tempo">
           tempo
@@ -788,23 +856,51 @@ export function TabDataViewer({ bundle }) {
         </div>
         <div className="ofv-card">
           <div className="ofv-card-head">
-            <h4>{activeTabMode === "actual" ? "Actual reference tab" : "Predicted tab"} — click the score to seek</h4>
+            <h4>{audioMode === "midi"
+              ? "Input MIDI — score (same notes as the piano roll)"
+              : `${activeTabMode === "actual" ? "Actual reference tab" : "Predicted tab"} — click the score to seek`}</h4>
             <div className="ofv-tab-controls">
+              <div className="ofv-mode" role="group" aria-label="Choose what to listen to">
+                <button
+                  type="button"
+                  className={audioMode === "tab" ? "active" : ""}
+                  aria-pressed={audioMode === "tab"}
+                  title="Listen to the tablature audio"
+                  onClick={() => switchAudioMode("tab")}
+                >
+                  Tab
+                </button>
+                <button
+                  type="button"
+                  className={audioMode === "midi" ? "active" : ""}
+                  aria-pressed={audioMode === "midi"}
+                  disabled={!hasMidiTex}
+                  title={hasMidiTex
+                    ? "Listen to the input MIDI through the same player"
+                    : "This bundle has no input-MIDI rendering (rebuild it)"}
+                  onClick={() => switchAudioMode("midi")}
+                >
+                  MIDI
+                </button>
+              </div>
               <div className="ofv-mode" role="group" aria-label="Choose predicted or actual tab">
                 <button
                   type="button"
-                  className={activeTabMode === "predicted" ? "active" : ""}
+                  className={activeTabMode === "predicted" && audioMode === "tab" ? "active" : ""}
                   aria-pressed={activeTabMode === "predicted"}
+                  title={audioMode === "midi" ? "Show the predicted tab (switches listening back to Tab)" : "Show the predicted tab"}
                   onClick={() => switchTabMode("predicted")}
                 >
                   Predicted
                 </button>
                 <button
                   type="button"
-                  className={activeTabMode === "actual" ? "active" : ""}
+                  className={activeTabMode === "actual" && audioMode === "tab" ? "active" : ""}
                   aria-pressed={activeTabMode === "actual"}
                   disabled={!hasReference}
-                  title={hasReference ? "Show the validation reference fingering" : "No reference tab was saved for this sample"}
+                  title={audioMode === "midi"
+                    ? "Show the validation reference fingering (switches listening back to Tab)"
+                    : (hasReference ? "Show the validation reference fingering" : "No reference tab was saved for this sample")}
                   onClick={() => switchTabMode("actual")}
                 >
                   Actual
@@ -835,8 +931,9 @@ export function TabDataViewer({ bundle }) {
       )}
       <div className="ofv-foot">
         One AlphaTab transport drives the tab cursor, the seek bar and the
-        piano-roll playhead — tab and roll stay in sync. Tab audio uses the
-        Salamander soundfont via CDN.
+        piano-roll playhead — tab and roll stay in sync. Flip Listen between
+        Tab and MIDI to A/B the fingering against the input through the same
+        player; the green bar tracks the sounding measures.
         {hasReference && " Switch Predicted/Actual above the score to compare fingerings."}
       </div>
     </div>

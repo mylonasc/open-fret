@@ -69,3 +69,25 @@ def test_rest_only_and_unrepresentable_time_are_not_silently_lost():
 def test_large_composite_duration_has_no_recursive_remainder_loop():
     assert sum(p.ticks for p in duration_pieces(1921)) == 1921
     assert sum(p.ticks for p in duration_pieces(10001)) == 10001
+
+
+def test_midi_track_spells_exact_notes_through_alphatab():
+    notes = [
+        {"start": 0, "end": 480, "pitch": 64},
+        {"start": 0, "end": 240, "pitch": 59},
+        {"start": 240, "end": 720, "pitch": 67},
+        {"start": 960, "end": 1200, "pitch": 60},
+    ]
+    tex = TabRenderer(tempo=100).to_alphatex_midi(notes, title="midi probe")
+    assert '\\track "Input MIDI"' in tex
+    assert "\\tuning" not in tex
+    actual = imported_attacks(tex)
+    assert sorted((e["tick"], e["pitch"], e["duration"]) for e in actual) == sorted(
+        (n["start"], n["pitch"], n["end"] - n["start"]) for n in notes)
+
+
+def test_midi_track_rejects_unnottable_input():
+    with pytest.raises(ValueError, match="start < end"):
+        TabRenderer().to_alphatex_midi([{"start": 100, "end": 100, "pitch": 64}])
+    with pytest.raises(ValueError, match="pitch"):
+        TabRenderer().to_alphatex_midi([{"start": 0, "end": 480, "pitch": 200}])

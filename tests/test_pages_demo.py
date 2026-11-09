@@ -19,6 +19,7 @@ def test_pages_demo_is_synthetic_and_contains_both_players(tmp_path):
     assert 'html-midi-player' not in page
     assert 'midi-player' not in page
     assert 'Choose predicted or actual tab' in page
+    assert 'Choose what to listen to' in page
     assert 'stay in sync on one transport' in page
     assert (output / 'examples/example.mid').read_bytes().startswith(b'MThd')
     assert (output / 'examples/predicted.tex').read_text() != (output / 'examples/reference.tex').read_text()

@@ -57,6 +57,7 @@ def test_build_view_bundle_from_tokens():
     raw = base64.b64decode(bundle["midi_b64"])
     assert raw[:4] == b"MThd"
     assert "\\tempo" in bundle["alpha_tex"] and "\\track" in bundle["alpha_tex"]
+    assert '\\track "Input MIDI"' in bundle["midi_alpha_tex"]
     assert bundle["meta"]["n_input_notes"] > 0
     assert bundle["input_notes"] == midi_tokens_to_notes(d["midi"])
     assert bundle["tab_tokens"] == d["tab"]

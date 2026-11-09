@@ -32,6 +32,22 @@ class DurationPiece:
         return "{" + " ".join(values) + "}" if values else ""
 
 
+# Scientific-pitch names indexed by MIDI pitch class; AlphaTab maps written
+# note names literally (E5 -> MIDI 76), so MIDI m spells PITCH_NAMES[m % 12]
+# in octave m // 12 - 1 (60 -> C4).
+PITCH_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+
+def midi_note_name(midi: int) -> str:
+    """Spell a MIDI pitch as AlphaTex pitched-track note text (``C#4``)."""
+    if not isinstance(midi, int) or isinstance(midi, bool) or not 0 <= midi <= 127:
+        raise ValueError(f"Unsupported MIDI pitch: {midi!r}")
+    octave = midi // 12 - 1
+    if not 0 <= octave <= 9:
+        raise ValueError(f"MIDI pitch out of notatable octave range: {midi}")
+    return f"{PITCH_NAMES[midi % 12]}{octave}"
+
+
 def _duration_specs():
     result = {}
     ratios = {1: 1, 3: 2, 5: 4, 6: 4, 7: 4, 9: 8, 10: 8, 11: 8, 12: 8}
@@ -152,6 +168,51 @@ class TabRenderer:
             return re.sub(r"(\d+)$",
                           lambda m: str(int(m.group(1)) - 1), tok)
         return " ".join(down_octave(t) for t in tuning_str.split())
+
+    def to_alphatex_midi(self, notes, title="open-fret") -> str:
+        """Render exact input notes as a pitched track for A/B listening.
+
+        Same partition/timing as :meth:`to_alphatex_notes` (attacks preserved,
+        sustains tied per voice), but spelled as concert pitches on an
+        untuned staff instead of frets. The viewer plays this through the
+        same AlphaTab player as the tab so the two can be compared without
+        a second clock. Tied continuations use the ``{t}`` effect, which
+        AlphaTab resolves by sounding pitch (verified against 1.3.0).
+        """
+        notes = list(notes)
+        for n in notes:
+            if (not isinstance(n.get("start"), int) or isinstance(n.get("start"), bool)
+                    or not isinstance(n.get("end"), int) or isinstance(n.get("end"), bool)
+                    or not n["start"] < n["end"]):
+                raise ValueError(f"Input notes need integer start < end: {n!r}")
+            midi_note_name(n["pitch"])  # fail loudly on unnotatable pitches
+        points = sorted({0} | {int(n[k]) for n in notes for k in ('start', 'end')})
+        body, tick = [], 0
+        for start, end in zip(points, points[1:]):
+            active = sorted((n for n in notes if n['start'] <= start < n['end']),
+                            key=lambda n: n['pitch'])
+            remaining = end - start
+            while remaining:
+                if tick and tick % 1920 == 0:
+                    body.append('|')
+                segment = min(remaining, 1920 - tick % 1920)
+                for piece in duration_pieces(segment):
+                    chord = []
+                    for n in active:
+                        name = midi_note_name(n['pitch'])
+                        chord.append(f"{name}{{t}}" if n['start'] < tick else name)
+                    beat = self.format_chord(chord) if chord else 'r'
+                    body.append(f":{piece.denominator} {beat}{piece.effects()}")
+                    tick += piece.ticks
+                    remaining -= piece.ticks
+        return '\n'.join([f'\\title {json.dumps(str(title), ensure_ascii=False)}',
+                          f"\\tempo {self.tempo}", ".",
+                          '\\track "Input MIDI"',
+                          # Notation-only staff: without this AlphaTab lays out a
+                          # (stringless) TAB staff and crashes painting it.
+                          "\\staff {score}",
+                          f"\\instrument {NYLON_GUITAR_PROGRAM}",
+                          ' '.join(body)]) + '\n'
 
     def to_alphatex(self, tokens, title="open-fret") -> str:
         """Render attacks exactly; absent final duration defaults to 480 ticks.
