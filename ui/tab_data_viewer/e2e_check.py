@@ -1,9 +1,10 @@
 """Headless-browser smoke test for tab_data_viewer (Issue #13).
 
 Serves the repo over HTTP, loads demo/example_output.html in Chromium,
-and asserts: React mounted, AlphaTab rendered SVGs, MIDI plays with
-advancing position, tab plays with advancing tick, mute toggle works,
-click-to-seek moves the playhead, zoom enlarges/resets the score.
+and asserts: React mounted, AlphaTab rendered SVGs, the single transport
+plays (seek bar + roll playhead advance together), the slider seeks both
+views, roll clicks seek the score, Predicted/Actual preserves position,
+mute toggles, and zoom enlarges/resets the score.
 
 Requires: playwright + a Chromium (playwright cache or Google Chrome).
 Run:  python ui/tab_data_viewer/e2e_check.py [--url URL]
@@ -60,32 +61,52 @@ def main(url=None):
               page.evaluate("() => !document.body.innerText.includes('Viewer bundle failed')"))
         n_svg = page.evaluate("() => document.querySelectorAll('.ofv-root svg').length")
         check("AlphaTab rendered notation", n_svg > 0, f"svg={n_svg}")
-        check("MIDI custom elements registered",
-              page.evaluate("() => !!customElements.get('midi-player') && !!customElements.get('midi-visualizer')"))
-        check("tab play enabled",
-              page.evaluate("() => ![...document.querySelectorAll('.ofv-root button')].find(b=>b.textContent.includes('▶ Tab')).disabled"))
+        check("WaveRoll rendered piano roll",
+              page.evaluate("() => document.querySelectorAll('.ofv-piano-roll canvas').length") == 1)
+        check("no legacy MIDI player",
+              page.evaluate("() => !document.querySelector('midi-player')"))
+        check("transport play enabled",
+              page.evaluate("() => ![...document.querySelectorAll('.ofv-root .ofv-transport button')].find(b=>b.textContent.includes('▶ Play')).disabled"))
 
-        page.click("text=▶ MIDI input")
+        state = lambda: page.evaluate(
+            "() => ({seek: document.querySelector('.ofv-seek').value,"
+            " roll: document.querySelector('.ofv-piano-roll')._ofvRoll.getState().currentTime,"
+            " tick: document.querySelector('.ofv-tab-render')._ofvApi.tickPosition})")
+
+        page.click("text=▶ Play")
         page.wait_for_timeout(4000)
-        t0 = page.evaluate("() => document.querySelector('midi-player').currentTime")
-        page.wait_for_timeout(2000)
-        t1 = page.evaluate("() => document.querySelector('midi-player').currentTime")
-        check("MIDI plays + seeks position", bool(
-            page.evaluate("() => document.querySelector('midi-player').playing")) and t1 > t0,
-            f"{t0}->{t1}")
+        s0 = state()
+        check("single transport plays, tab + roll advance together",
+              float(s0["seek"]) > 0.5 and abs(float(s0["roll"]) - float(s0["seek"])) < 0.8,
+              f"{s0}")
+        check("play button shows pause",
+              page.evaluate("() => [...document.querySelectorAll('.ofv-transport button')].some(b=>b.textContent.includes('⏸ Pause'))"))
 
-        page.click("button[title='Stop MIDI']")
-        page.click("text=▶ Tab")
-        page.wait_for_timeout(6000)
-        tick = page.evaluate("""() => (document.querySelector('.ofv-root').innerText.match(/tick (\\d+)/) || [])[1] || null""")
-        check("tab plays, tick advances", tick is not None and int(tick) > 0, f"tick={tick}")
+        # slider seek: pause first for a deterministic assertion, use the
+        # native value setter so React's tracker fires. Seek to 60% of the
+        # score (never the exact end: hitting the final tick finishes
+        # playback and resets to zero, like most players).
+        page.click("text=⏸ Pause")
+        page.wait_for_timeout(500)
+        target = page.evaluate("() => Number(document.querySelector('.ofv-seek').max) * 0.6")
+        page.eval_on_selector(".ofv-seek", """(el, v) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+          setter.call(el, String(v));
+          el.dispatchEvent(new Event("input", {bubbles: true}));
+        }""", target)
+        page.wait_for_timeout(1200)
+        s1 = state()
+        check("slider seeks score + roll",
+              abs(float(s1["seek"]) - target) < 0.3 and abs(float(s1["roll"]) - target) < 0.4,
+              f"target={target:.2f} {s1}")
 
         page.click("text=Mute tab")
         check("mute toggles",
               page.evaluate("() => document.body.innerText.includes('Unmute tab')"))
+        page.click("text=Unmute tab")
 
-        # click-to-seek: stop playback, click mid-score, playhead must jump
-        page.click("button[title='Stop tab']")
+        # score click-to-seek moves the same shared position
+        page.click("button[title='Stop and return to the start']")
         page.wait_for_timeout(1000)
         box = page.evaluate(
             "() => { const s = document.querySelector('.ofv-root svg');"
@@ -98,8 +119,21 @@ def main(url=None):
         tick1 = page.evaluate(
             "() => { const r = document.querySelector('.ofv-tab-render');"
             " return r && r._ofvApi ? r._ofvApi.tickPosition : -999; }")
-        check("click seeks playhead", tick1 is not None and tick1 > 0,
+        check("score click seeks shared position", tick1 is not None and tick1 > 0,
               f"tick={tick1}")
+
+        # piano-roll click seeks the score too
+        roll_box = page.evaluate(
+            "() => { const r = document.querySelector('.ofv-piano-roll');"
+            " if (!r) return null; const b = r.getBoundingClientRect();"
+            " return {x: b.x, y: b.y, w: b.width, h: b.height}; }")
+        if roll_box:
+            page.mouse.click(roll_box["x"] + roll_box["w"] * 0.5,
+                             roll_box["y"] + roll_box["h"] * 0.5)
+            page.wait_for_timeout(1200)
+        s2 = state()
+        check("roll click seeks score",
+              float(s2["seek"]) > 0.5 and s2["tick"] > 0, f"{s2}")
 
         # zoom: score must get taller at 110%, reset restores 100%
         h0 = page.evaluate(

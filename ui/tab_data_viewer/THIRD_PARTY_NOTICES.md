@@ -28,7 +28,7 @@ SOFTWARE.
 
 # Runtime dependencies (loaded externally, not bundled here)
 
-- AlphaTab 1.3.0 (notation, synthesizer, fonts and soundfont):
+- AlphaTab 1.3.0 (notation, synthesizer, audio transport, fonts, soundfont):
   https://github.com/CoderLine/alphaTab/tree/v1.3.0
 - WaveRoll 0.4.0 (piano-roll rendering):
   https://github.com/crescent-stdio/wave-roll (MIT)
@@ -36,13 +36,5 @@ SOFTWARE.
   - Tone.js 15 (bundled audio engine): https://github.com/Tonejs/Tone.js (MIT)
   - @tonejs/midi (MIDI parsing): https://github.com/Tonejs/Midi (MIT)
   - d3-scale (time/pitch scales): https://github.com/d3/d3-scale (ISC)
-- html-midi-player 1.5.0 (audio controls and Magenta player):
-  https://github.com/cifkao/html-midi-player (BSD-2-Clause)
-- Tone.js 14.7.77 (html-midi-player audio):
-  https://github.com/Tonejs/Tone.js (MIT)
-- Magenta Music 1.23.0 (html-midi-player backend):
-  https://github.com/magenta/magenta-js/tree/master/music (Apache-2.0)
-- focus-visible:
-  https://github.com/WICG/focus-visible (W3C BSD-3-Clause)
 
 Each external component and its audio assets remain subject to its own terms.

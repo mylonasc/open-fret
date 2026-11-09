@@ -87,9 +87,9 @@ def midi_tokens_to_notes(midi_tokens, default_duration=480):
 def notes_to_midi_bytes(notes, tempo=120, ticks_per_beat=TICKS_PER_BEAT):
     """Serialize notes to Standard MIDI bytes (pretty_midi).
 
-    Program is Acoustic Guitar (nylon) so the html-midi-player panel — which
-    picks its soundfont samples from the MIDI program — sounds classical,
-    matching the AlphaTab tab track (``\\instrument 24``).
+    Program is Acoustic Guitar (nylon), matching the AlphaTab tab track
+    (``\\instrument 24``). The bytes back the downloadable ``.mid`` artifact;
+    in-browser audio comes from the AlphaTab player.
     """
     import pretty_midi
 
@@ -185,12 +185,9 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
 
 ALPHATAB_JS = ("https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0"
                "/dist/alphaTab.min.js")
-MIDI_PLAYER_JS = ("https://cdn.jsdelivr.net/combine/npm/tone@14.7.77,"
-                  "npm/@magenta/music@1.23.0/es6/core.js,"
-                  "npm/focus-visible@5,npm/html-midi-player@1.5.0")
-# Rendering-only piano roll (MIT). Used for the grid, note rectangles and
-# playhead; audio controls remain html-midi-player so they can be wired to
-# the tab transport. Pinned: UMD global names and config are version-specific.
+# Rendering-only piano roll (MIT): grid, note rectangles and playhead.
+# AlphaTab owns the single audio/clock transport; the roll follows its tick
+# position. Pinned: UMD global names and config are version-specific.
 WAVE_ROLL_JS = ("https://cdn.jsdelivr.net/npm/wave-roll@0.4.0"
                 "/dist/wave-roll.umd.js")
 
@@ -204,8 +201,8 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
 
     Pass ``with_deps=False`` (and ``dist_js=None``) for the 2nd..Nth bundle
     on a page that already includes the CDN scripts + dist bundle once —
-    re-including them redefines the ``midi-player`` custom element and
-    throws. See ``scripts/make_run_viewer.py``.
+    re-executing the dist bundle remounts React roots and wastes bandwidth.
+    See ``scripts/make_run_viewer.py``.
     """
     uid = uuid.uuid4().hex[:8]
     # json.dumps never emits "</script>", but TAB/AlphaTex text is
@@ -217,8 +214,7 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
     if with_deps:
         if dist_js is None:
             raise ValueError("dist_js is required when with_deps=True.")
-        deps = (f'<script src="{MIDI_PLAYER_JS}"></script>\n'
-                f'<script src="{WAVE_ROLL_JS}"></script>\n'
+        deps = (f'<script src="{WAVE_ROLL_JS}"></script>\n'
                 f'<script src="{ALPHATAB_JS}"></script>\n'
                 f"<script>\n{dist_js}\n</script>\n")
     return f"""{deps}<div id="ofv-{uid}" class="ofv-root"></div>

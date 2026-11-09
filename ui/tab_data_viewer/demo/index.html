@@ -5,18 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="data:," />
     <title>open-fret tab_data_viewer demo</title>
-    <!-- MIDI player stack (player + piano-roll visualizer) -->
-    <script src="https://cdn.jsdelivr.net/combine/npm/tone@14.7.77,npm/@magenta/music@1.23.0/es6/core.js,npm/focus-visible@5,npm/html-midi-player@1.5.0"></script>
-    <!-- AlphaTab score renderer + player -->
+    <!-- WaveRoll piano-roll renderer + AlphaTab score renderer/player -->
+    <script src="https://cdn.jsdelivr.net/npm/wave-roll@0.4.0/dist/wave-roll.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/alphaTab.min.js"></script>
     <script src="../dist/tab-data-viewer.umd.js"></script>
   </head>
   <body>
     <h2>open-fret tab_data_viewer demo</h2>
     <p>
-      Left: input MIDI (playable piano-roll). Right: predicted tab rendered by
-      AlphaTab (playable, click the score to seek). Bundle:
-      <code>bundle.example.json</code>
+      Left: source MIDI notes as a piano roll. Right: predicted tab rendered
+      by AlphaTab. One transport drives both: Play/Pause, the seek bar, score
+      clicks and roll clicks move the tab cursor and the roll playhead
+      together. Bundle: <code>bundle.example.json</code>
     </p>
     <div id="app"></div>
     <script>

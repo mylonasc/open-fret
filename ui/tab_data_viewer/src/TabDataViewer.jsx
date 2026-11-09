@@ -72,6 +72,64 @@ const PIANO_ROLL_OPTIONS = {
   minorTimeStep: 0.25,
 };
 
+// AlphaTab counts 960 ticks per quarter note internally (verified live:
+// endTick/endTime == tempo*960/60 ticks per second). Source token windows use
+// bundle.ticks_per_beat (480) — the two grids agree on musical time because
+// both are rendered at the same source tempo.
+const SCORE_TICKS_PER_QUARTER = 960;
+
+function scoreTickToSeconds(tick, bundle) {
+  return ((Number(tick) || 0) * 60) / ((bundle.tempo || 120) * SCORE_TICKS_PER_QUARTER);
+}
+
+function scoreSecondsToTick(seconds, bundle) {
+  return Math.max(
+    0,
+    Math.round(((Number(seconds) || 0) * (bundle.tempo || 120) * SCORE_TICKS_PER_QUARTER) / 60)
+  );
+}
+
+function sourceTickToSeconds(tick, bundle) {
+  return ((Number(tick) || 0) * 60) / ((bundle.tempo || 120) * (bundle.ticks_per_beat || 480));
+}
+
+function sourceNotes(bundle) {
+  return Array.isArray(bundle.input_notes) && bundle.input_notes.length
+    ? bundle.input_notes
+    : tokensToNotes(bundle.input_tokens);
+}
+
+function fallbackDuration(bundle) {
+  const ends = sourceNotes(bundle).map((n) => Number(n.end) || 0);
+  return ends.length ? sourceTickToSeconds(Math.max(...ends), bundle) : 0;
+}
+
+function formatTime(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const rest = value - minutes * 60;
+  return `${minutes}:${rest.toFixed(1).padStart(4, "0")}`;
+}
+
+function rollTimeAtClientX(roll, host, clientX) {
+  // WaveRoll paints time as scale(t) * zoomX + pianoKeys + panX. Invert that
+  // expression so a click lands on the note grid under the pointer.
+  const inner = roll && roll._instance;
+  if (!inner || !inner.timeScale || !inner.state) return null;
+  try {
+    const rect = host.getBoundingClientRect();
+    const keys = inner.options.showPianoKeys ? 60 : 0;
+    const x = clientX - rect.left;
+    const time = inner.timeScale.invert(
+      (x - keys - inner.state.panX) / inner.state.zoomX
+    );
+    const end = inner.timeScale.domain()[1];
+    return Math.min(Math.max(time, 0), end);
+  } catch (_) {
+    return null;
+  }
+}
+
 function pianoRollOptions(notes) {
   const pitches = notes.map((n) => n.midi).filter(Number.isFinite);
   let min = pitches.length ? Math.min(...pitches) : 40;
@@ -116,10 +174,20 @@ const CSS = `
 .ofv-card h4 { margin: 0; padding: 8px 12px; font-size: 13px; font-weight: 650;
   background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-midi-body { padding: 10px 12px; min-height: 120px; }
-.ofv-midi-body midi-player { width: 100%; }
-.ofv-piano-roll { width: 100%; height: 280px; margin-top: 8px; border: 1px solid #e2e8f0;
-  border-radius: 8px; overflow: hidden; background: #fff; }
-@media (max-width: 760px) { .ofv-piano-roll { height: 210px; } }
+.ofv-piano-roll { width: 100%; height: 300px; border: 1px solid #e2e8f0;
+  border-radius: 8px; overflow: hidden; background: #fff; position: relative; }
+@media (max-width: 760px) { .ofv-piano-roll { height: 220px; } }
+.ofv-seek-row { display: flex; align-items: center; gap: 10px; width: 100%;
+  padding-top: 8px; border-top: 1px solid #e2e8f0; margin-top: 2px; }
+.ofv-seek-label { font-size: 12px; color: #64748b; text-transform: uppercase;
+  letter-spacing: 0.06em; }
+.ofv-seek { flex: 1 1 240px; min-width: 120px; accent-color: #4f46e5; cursor: pointer; }
+.ofv-seek:disabled { cursor: default; opacity: 0.5; }
+.ofv-time { font-size: 12px; color: #475569; font-variant-numeric: tabular-nums;
+  white-space: nowrap; }
+.ofv-midi-body .ofv-skeleton { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; }
+.ofv-roll-wrap { position: relative; }
 .ofv-card-head { display: flex; align-items: center; justify-content: space-between;
   gap: 8px; padding: 6px 12px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; }
 .ofv-card-head h4 { margin: 0; padding: 0; background: none; border: none;
@@ -152,13 +220,6 @@ const CSS = `
 .ofv-foot { margin-top: 8px; font-size: 12px; color: #94a3b8; }
 `;
 
-function b64ToBlobUrl(b64, mime) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
-}
-
 function TokenInspector({ title, tokens }) {
   const text = Array.isArray(tokens) ? tokens.join(" ") : String(tokens ?? "");
   return (
@@ -172,14 +233,13 @@ function TokenInspector({ title, tokens }) {
 }
 
 export function TabDataViewer({ bundle }) {
-  const midiWrapRef = useRef(null);
+  const rollWrapRef = useRef(null);
   const tabScrollRef = useRef(null);
   const tabRenderRef = useRef(null);
   const apiRef = useRef(null);
-  const playerRef = useRef(null);
   const rollRef = useRef(null);
   const trackRef = useRef([]);
-  const [ready, setReady] = useState({ midi: false, tab: false });
+  const [ready, setReady] = useState({ tab: false, player: false, roll: false });
   const [tabPlaying, setTabPlaying] = useState(false);
   const [tabMode, setTabMode] = useState("predicted");
   const pendingTickRef = useRef(null);
@@ -188,7 +248,8 @@ export function TabDataViewer({ bundle }) {
   const activeTex = activeTabMode === "actual" ? bundle.reference_alpha_tex : bundle.alpha_tex;
   const [muted, setMuted] = useState(false);
   const [tempo, setTempo] = useState(bundle.tempo || 120);
-  const [tick, setTick] = useState(null);
+  const [pos, setPos] = useState(0);
+  const [duration, setDuration] = useState(() => fallbackDuration(bundle));
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   const applyZoom = (z) => {
@@ -216,81 +277,70 @@ export function TabDataViewer({ bundle }) {
   const addWarn = (m) => setWarn((w) => (w.includes(m) ? w : [...w, m]));
   const uid = bundle._uid || "x";
 
-  // MIDI panel: html-midi-player supplies compact audio controls; WaveRoll
-  // (createPianoRoll) draws the grid, notes and a scrolling playhead. The
-  // two are synchronized through the player's start/stop events and seek bar.
-  useEffect(() => {
-    const host = midiWrapRef.current;
-    if (!host) return;
-    host.innerHTML = "";
-    let url = null;
-    let roll = null;
-    let rollFrame = null;
-    let resizeObserver = null;
-    let seekInput = null;
-    let seekChange = null;
-    let cancelled = false;
+  const syncRoll = (seconds) => {
+    const roll = rollRef.current;
+    if (roll && Number.isFinite(seconds)) {
+      try {
+        roll.setTime(seconds);
+      } catch (_) {}
+    }
+  };
+
+  // Single transport: AlphaTab owns the score clock and audio. Every seek
+  // (slider, score click, piano-roll click) goes through here so the tab and
+  // the roll cannot drift apart.
+  const seekTo = (seconds) => {
+    const value = Math.max(0, Number(seconds) || 0);
+    const api = apiRef.current;
+    pendingTickRef.current = null;
     try {
-      url = b64ToBlobUrl(bundle.midi_b64, "audio/midi");
-      const player = document.createElement("midi-player");
-      player.setAttribute("src", url);
-      player.setAttribute("sound-font", "");
-      const rollHost = document.createElement("div");
-      rollHost.className = "ofv-piano-roll";
-      rollHost.setAttribute("role", "img");
-      rollHost.setAttribute("aria-label", "Input MIDI piano roll");
-      host.appendChild(player);
-      host.appendChild(rollHost);
-      playerRef.current = player;
+      if (api) api.tickPosition = scoreSecondsToTick(value, bundle);
+    } catch (_) {}
+    setPos(value);
+    syncRoll(value);
+  };
 
-      const drawPlayhead = () => {
-        rollFrame = null;
-        if (!roll || !player) return;
-        try {
-          roll.setTime(player.currentTime || 0);
-        } catch (_) {}
-      };
-      const startFollow = () => {
-        if (rollFrame != null) return;
-        const tick = () => {
-          rollFrame = null;
-          drawPlayhead();
-          if (player.playing && !cancelled) {
-            rollFrame = window.requestAnimationFrame(tick);
-          }
-        };
-        rollFrame = window.requestAnimationFrame(tick);
-      };
-      const stopFollow = () => {
-        if (rollFrame != null) {
-          window.cancelAnimationFrame(rollFrame);
-          rollFrame = null;
-        }
-        drawPlayhead();
-      };
-      player.addEventListener("start", startFollow);
-      player.addEventListener("loop", startFollow);
-      player.addEventListener("stop", stopFollow);
-
-      player.addEventListener("load", () => {
-        setReady((r) => ({ ...r, midi: true }));
-        drawPlayhead();
-      });
-
-      // The seek bar lives in the player's open shadow root; no public
-      // seeking event exists, so mirror its input/change events.
-      const seekBar = player.shadowRoot && player.shadowRoot.querySelector(".seek-bar");
-      if (seekBar) {
-        seekInput = () => drawPlayhead();
-        seekChange = () => drawPlayhead();
-        seekBar.addEventListener("input", seekInput);
-        seekBar.addEventListener("change", seekChange);
+  const refreshDuration = () => {
+    const api = apiRef.current;
+    let seconds = 0;
+    try {
+      const bars = api && api.tickCache && api.tickCache.masterBars;
+      if (bars && bars.length) {
+        seconds = scoreTickToSeconds(bars[bars.length - 1].end, bundle);
       }
+    } catch (_) {}
+    if (!(seconds > 0)) seconds = fallbackDuration(bundle);
+    if (seconds > 0) setDuration(seconds);
+    return seconds;
+  };
 
-      if (window.WaveRoll && window.WaveRoll.createPianoRoll) {
+  // Piano roll: WaveRoll draws the grid, notes and a scrolling playhead. Its
+  // position is driven by the AlphaTab tick position (see the rAF effect).
+  useEffect(() => {
+    const host = rollWrapRef.current;
+    if (!host) return;
+    let roll = null;
+    let resizeObserver = null;
+    let cancelled = false;
+    let down = null;
+    const onPointerDown = (event) => {
+      down = { x: event.clientX, y: event.clientY };
+    };
+    const onClick = (event) => {
+      if (event.target && event.target.closest && event.target.closest("button")) return;
+      if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 6) return;
+      const time = rollTimeAtClientX(roll, host, event.clientX);
+      if (time != null) seekTo(time);
+    };
+    host.addEventListener("pointerdown", onPointerDown);
+    host.addEventListener("click", onClick);
+    try {
+      if (!window.WaveRoll || !window.WaveRoll.createPianoRoll) {
+        addWarn("WaveRoll failed to load (CDN blocked?). Piano roll disabled.");
+      } else {
         const notes = rollNotes(bundle);
         window.WaveRoll.createPianoRoll(
-          rollHost,
+          host,
           notes,
           pianoRollOptions(notes)
         ).then((instance) => {
@@ -300,55 +350,43 @@ export function TabDataViewer({ bundle }) {
           }
           roll = instance;
           rollRef.current = instance;
-          try { rollHost._ofvRoll = instance; } catch (_) {}
-          drawPlayhead();
+          try { host._ofvRoll = instance; } catch (_) {}
+          setReady((r) => ({ ...r, roll: true }));
+          let start = 0;
+          try {
+            if (apiRef.current) {
+              start = scoreTickToSeconds(apiRef.current.tickPosition, bundle);
+            }
+          } catch (_) {}
+          try { instance.setTime(start); } catch (_) {}
           resizeObserver = new ResizeObserver(() => {
             try {
-              instance.resize(rollHost.clientWidth, rollHost.clientHeight);
+              instance.resize(host.clientWidth, host.clientHeight);
             } catch (_) {}
           });
-          resizeObserver.observe(rollHost);
+          resizeObserver.observe(host);
         }).catch((err) => {
           addWarn(`Piano roll failed: ${err}`);
           console.error(err);
         });
-      } else {
-        addWarn("WaveRoll failed to load (CDN blocked?). Piano roll disabled.");
-      }
-
-      if (player.start === undefined && !customElements.get("midi-player")) {
-        addWarn("html-midi-player failed to load (CDN blocked?). MIDI panel disabled.");
       }
     } catch (err) {
-      addWarn(`MIDI panel failed: ${err}`);
+      addWarn(`Piano roll failed: ${err}`);
       console.error(err);
     }
     return () => {
       cancelled = true;
-      if (rollFrame != null) window.cancelAnimationFrame(rollFrame);
+      host.removeEventListener("pointerdown", onPointerDown);
+      host.removeEventListener("click", onClick);
       if (resizeObserver) resizeObserver.disconnect();
-      if (seekInput) {
-        const bar = playerRef.current && playerRef.current.shadowRoot &&
-          playerRef.current.shadowRoot.querySelector(".seek-bar");
-        if (bar) bar.removeEventListener("input", seekInput);
-      }
-      if (seekChange) {
-        const bar = playerRef.current && playerRef.current.shadowRoot &&
-          playerRef.current.shadowRoot.querySelector(".seek-bar");
-        if (bar) bar.removeEventListener("change", seekChange);
-      }
       try {
         roll && roll.destroy && roll.destroy();
       } catch (_) {}
       rollRef.current = null;
-      try {
-        playerRef.current && playerRef.current.stop && playerRef.current.stop();
-      } catch (_) {}
-      if (url) URL.revokeObjectURL(url);
       host.innerHTML = "";
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundle.midi_b64, bundle.title]);
+  }, [bundle.midi_b64, bundle.title, bundle.tempo]);
 
   // TAB panel: render into the INNER node; the OUTER node is the scroll
   // element. (Passing the render node as its own scrollElement makes the
@@ -396,6 +434,41 @@ export function TabDataViewer({ bundle }) {
             try {
               trackRef.current = score && score.tracks ? score.tracks : [];
             } catch (_) {}
+            refreshDuration();
+          });
+      } catch (_) {}
+      try {
+        api.playerReady &&
+          api.playerReady.on &&
+          api.playerReady.on(() => {
+            setReady((r) => ({ ...r, player: true }));
+            refreshDuration();
+          });
+      } catch (_) {}
+      // AlphaTab is the only audio source and the only clock: its state and
+      // tick position drive the transport bar, the tab cursor and the roll.
+      try {
+        api.playerStateChanged &&
+          api.playerStateChanged.on &&
+          api.playerStateChanged.on((e) => {
+            setTabPlaying(Boolean(e && e.state === 1));
+            if (e && e.stopped) {
+              setPos(0);
+              syncRoll(0);
+            }
+          });
+      } catch (_) {}
+      try {
+        api.playerPositionChanged &&
+          api.playerPositionChanged.on &&
+          api.playerPositionChanged.on((args) => {
+            if (!args || pendingTickRef.current != null) return;
+            const seconds = scoreTickToSeconds(args.currentTick, bundle);
+            setPos(seconds);
+            syncRoll(seconds);
+            if (args.endTick > 0) {
+              setDuration(scoreTickToSeconds(args.endTick, bundle));
+            }
           });
       } catch (_) {}
       // Re-apply the user's zoom on (re)mount — a fresh Api starts at 1.0.
@@ -411,18 +484,8 @@ export function TabDataViewer({ bundle }) {
           api.beatMouseDown.on((beat) => {
             try {
               if (beat && typeof beat.playbackStart === "number") {
-                api.tickPosition = beat.playbackStart;
-                setTick(beat.playbackStart);
+                seekTo(scoreTickToSeconds(beat.playbackStart, bundle));
               }
-            } catch (_) {}
-          });
-        }
-      } catch (_) {}
-      try {
-        if (api.playedBeatChanged && api.playedBeatChanged.on) {
-          api.playedBeatChanged.on(() => {
-            try {
-              if (typeof api.tickPosition === "number") setTick(api.tickPosition);
             } catch (_) {}
           });
         }
@@ -441,6 +504,39 @@ export function TabDataViewer({ bundle }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bundle.title]);
 
+  // Roll + slider follow the score clock smoothly while playing. Position
+  // events alone are too coarse for a scrolling playhead, so mirror the
+  // AlphaTab tick each animation frame (score seconds; unaffected by tempo).
+  useEffect(() => {
+    if (!tabPlaying) return;
+    let raf = null;
+    let lastUi = 0;
+    const loop = (now) => {
+      const api = apiRef.current;
+      if (api && pendingTickRef.current == null) {
+        let tick = null;
+        try {
+          tick = api.tickPosition;
+        } catch (_) {}
+        if (Number.isFinite(tick)) {
+          const seconds = scoreTickToSeconds(tick, bundle);
+          syncRoll(seconds);
+          // The roll moves every frame; React state only needs ~10 Hz.
+          if (now - lastUi >= 100) {
+            lastUi = now;
+            setPos(seconds);
+          }
+        }
+      }
+      raf = window.requestAnimationFrame(loop);
+    };
+    raf = window.requestAnimationFrame(loop);
+    return () => {
+      if (raf != null) window.cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabPlaying]);
+
   // Swap the score when the user toggles predicted/actual, keeping the same
   // player so playback/seeking survives the switch.
   useEffect(() => {
@@ -457,7 +553,10 @@ export function TabDataViewer({ bundle }) {
     }
 
     const target = pendingTickRef.current;
-    if (target == null) return;
+    if (target == null) {
+      refreshDuration();
+      return;
+    }
 
     let pollTimer = null;
     let settleTimer = null;
@@ -489,7 +588,8 @@ export function TabDataViewer({ bundle }) {
             pendingTickRef.current != null &&
             Math.abs((api.tickPosition || 0) - target) <= 2
           ) {
-            setTick(target);
+            setPos(scoreTickToSeconds(target, bundle));
+            syncRoll(scoreTickToSeconds(target, bundle));
             pendingTickRef.current = null;
             stop();
           }
@@ -523,26 +623,34 @@ export function TabDataViewer({ bundle }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTex, bundle.title]);
 
-  const playTab = () => {
+  const togglePlay = () => {
     const api = apiRef.current;
     if (!api) return;
     try {
       if (typeof api.playPause === "function") api.playPause();
-      else if (typeof api.play === "function") api.play();
+      else if (tabPlaying && typeof api.pause === "function") api.pause();
+      else if (!tabPlaying && typeof api.play === "function") api.play();
       else {
         addWarn("This AlphaTab build exposes no play method.");
         return;
       }
-      setTabPlaying(true);
+      // playerStateChanged corrects this if the player disagrees.
+      setTabPlaying(!tabPlaying);
     } catch (err) {
       addWarn(`Tab playback failed: ${err}`);
     }
   };
-  const stopTab = () => {
+  const stopAll = () => {
+    const api = apiRef.current;
     try {
-      apiRef.current && apiRef.current.stop && apiRef.current.stop();
+      api && api.stop && api.stop();
     } catch (_) {}
     setTabPlaying(false);
+    setPos(0);
+    syncRoll(0);
+  };
+  const onSeek = (event) => {
+    seekTo(Number(event.target.value));
   };
   const switchTabMode = (mode) => {
     if (mode === activeTabMode || (mode === "actual" && !hasReference)) return;
@@ -550,12 +658,16 @@ export function TabDataViewer({ bundle }) {
       pendingTickRef.current =
         apiRef.current && typeof apiRef.current.tickPosition === "number"
           ? apiRef.current.tickPosition
-          : tick;
+          : scoreSecondsToTick(pos, bundle);
     } catch (_) {
-      pendingTickRef.current = tick;
+      pendingTickRef.current = scoreSecondsToTick(pos, bundle);
     }
     try {
-      apiRef.current && apiRef.current.stop && apiRef.current.stop();
+      const api = apiRef.current;
+      if (api) {
+        if (!tabPlaying && typeof api.pause === "function") api.pause();
+        else if (api.stop) api.stop();
+      }
     } catch (_) {}
     setTabPlaying(false);
     setReady((r) => ({ ...r, tab: false }));
@@ -577,27 +689,6 @@ export function TabDataViewer({ bundle }) {
       }
     } catch (err) {
       addWarn(`Mute failed: ${err}`);
-    }
-  };
-  const playMidi = () => {
-    try {
-      playerRef.current && playerRef.current.start && playerRef.current.start();
-    } catch (err) {
-      addWarn(`MIDI playback failed: ${err}`);
-    }
-  };
-  const stopMidi = () => {
-    try {
-      playerRef.current && playerRef.current.stop && playerRef.current.stop();
-    } catch (_) {}
-  };
-  const playBoth = () => {
-    playMidi();
-    try {
-      apiRef.current && apiRef.current.play && apiRef.current.play();
-      setTabPlaying(true);
-    } catch (_) {
-      playTab();
     }
   };
   const onTempo = (v) => {
@@ -633,18 +724,37 @@ export function TabDataViewer({ bundle }) {
         </div>
       )}
       <div className="ofv-transport">
-        <button className="ofv-btn primary" onClick={playMidi} disabled={!ready.midi}>
-          ▶ MIDI input
+        <button
+          className="ofv-btn primary"
+          onClick={togglePlay}
+          disabled={!ready.tab || !ready.player}
+          title={ready.player ? "Play or pause (tab audio + roll follow)" : "Waiting for the tab player…"}
+        >
+          {tabPlaying ? "⏸ Pause" : "▶ Play"}
         </button>
-        <button className="ofv-btn" onClick={stopMidi} title="Stop MIDI">
+        <button
+          className="ofv-btn"
+          onClick={stopAll}
+          disabled={!ready.tab}
+          title="Stop and return to the start"
+        >
           ⏹
         </button>
-        <button className="ofv-btn primary" onClick={playTab} disabled={!ready.tab}>
-          {tabPlaying ? "⏸ Tab" : "▶ Tab"}
-        </button>
-        <button className="ofv-btn" onClick={stopTab} title="Stop tab">
-          ⏹
-        </button>
+        <span className="ofv-seek-label">seek</span>
+        <input
+          type="range"
+          className="ofv-seek"
+          aria-label="Seek tablature and piano roll"
+          min={0}
+          max={duration > 0 ? duration : 0}
+          step={0.01}
+          value={duration > 0 ? Math.min(pos, duration) : 0}
+          onChange={onSeek}
+          disabled={!ready.tab || !(duration > 0)}
+        />
+        <span className="ofv-time">
+          {formatTime(pos)} / {formatTime(duration)}
+        </span>
         <button
           className="ofv-btn"
           onClick={toggleMute}
@@ -652,14 +762,6 @@ export function TabDataViewer({ bundle }) {
           title="Mute/unmute the tab track for A/B listening"
         >
           {muted ? "🔈 Unmute tab" : "🔇 Mute tab"}
-        </button>
-        <button
-          className="ofv-btn"
-          onClick={playBoth}
-          disabled={!(ready.midi && ready.tab)}
-          title="Start both players together (approximate sync)"
-        >
-          ▶▶ Both
         </button>
         <label className="ofv-tempo">
           tempo
@@ -671,14 +773,17 @@ export function TabDataViewer({ bundle }) {
             ))}
           </select>
         </label>
-        {tick !== null && tick !== undefined && <span className="ofv-tick">tick {tick}</span>}
+        <span className="ofv-tick">tick {scoreSecondsToTick(pos, bundle)}</span>
       </div>
       <div className="ofv-grid">
         <div className="ofv-card">
-          <h4>Input MIDI — piano roll (play above; wheel/pinch zooms)</h4>
+          <h4>Input MIDI — piano roll (click to seek; drag to pan, wheel to zoom)</h4>
           <div className="ofv-midi-body">
-            {!ready.midi && <div className="ofv-skeleton">Loading MIDI player…</div>}
-            <div ref={midiWrapRef} data-uid={uid} />
+            <div className="ofv-roll-wrap">
+              {!ready.roll && <div className="ofv-skeleton">Loading piano roll…</div>}
+              <div ref={rollWrapRef} className="ofv-piano-roll" data-uid={uid}
+                role="img" aria-label="Input MIDI piano roll" />
+            </div>
           </div>
         </div>
         <div className="ofv-card">
@@ -729,8 +834,9 @@ export function TabDataViewer({ bundle }) {
         <TokenInspector title="Actual reference TAB tokens" tokens={bundle.reference_tab_tokens} />
       )}
       <div className="ofv-foot">
-        Tab audio uses the Salamander soundfont via CDN; MIDI panel uses the
-        Magenta soundfont. Panels play independently — “Both” starts them together.
+        One AlphaTab transport drives the tab cursor, the seek bar and the
+        piano-roll playhead — tab and roll stay in sync. Tab audio uses the
+        Salamander soundfont via CDN.
         {hasReference && " Switch Predicted/Actual above the score to compare fingerings."}
       </div>
     </div>

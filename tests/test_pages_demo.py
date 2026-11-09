@@ -16,10 +16,10 @@ def test_pages_demo_is_synthetic_and_contains_both_players(tmp_path):
     page = (output / 'examples/player.html').read_text()
     assert 'alphaTab.min.js' in page
     assert 'wave-roll' in page
-    assert 'html-midi-player' in page
+    assert 'html-midi-player' not in page
+    assert 'midi-player' not in page
     assert 'Choose predicted or actual tab' in page
-    assert 'piano roll' in page
-    assert 'not a model prediction' in page
+    assert 'stay in sync on one transport' in page
     assert (output / 'examples/example.mid').read_bytes().startswith(b'MThd')
     assert (output / 'examples/predicted.tex').read_text() != (output / 'examples/reference.tex').read_text()
     assert manifest['notes'] == 36

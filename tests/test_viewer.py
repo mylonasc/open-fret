@@ -79,7 +79,7 @@ def test_to_html_contains_mount_points():
               "meta": {}, "tempo": 120, "ticks_per_beat": 480}
     html = to_html(bundle, dist_js="/* fake bundle */")
     assert "ofv-" in html
-    assert "alphaTab" in html and "midi-player" in html
-    assert "wave-roll" in html
+    assert "alphaTab" in html and "wave-roll" in html
+    assert "midi-player" not in html
     assert "/* fake bundle */" in html
     assert "AAA=" in html

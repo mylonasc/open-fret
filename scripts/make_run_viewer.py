@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from open_fret.viewer import (ALPHATAB_JS, MIDI_PLAYER_JS, build_view_bundle,
+from open_fret.viewer import (ALPHATAB_JS, WAVE_ROLL_JS, build_view_bundle,
                                to_html)
 
 
@@ -80,7 +80,7 @@ def build_run_viewer(run_dir, step=None, step_dir=None, out_name="viewer.html"):
         n_ok += 1
 
     loss_str = f"{eval_loss:.4f}" if eval_loss is not None else "n/a"
-    deps = (f'<script src="{MIDI_PLAYER_JS}"></script>\n'
+    deps = (f'<script src="{WAVE_ROLL_JS}"></script>\n'
             f'<script src="{ALPHATAB_JS}"></script>\n'
             f"<script>\n{dist_js}\n</script>\n")
     html = ("<!doctype html>\n<html><head><meta charset=\"utf-8\">"
@@ -91,7 +91,9 @@ def build_run_viewer(run_dir, step=None, step_dir=None, out_name="viewer.html"):
              f"(eval loss {loss_str})</h1>\n"
              f"<details><summary>Loss components / validation metrics</summary><pre>{metric_summary}</pre></details>"
             "<p>Needs internet access for CDN scripts + soundfont. "
-            "Each section: input MIDI (left) vs tab (right); use the "
+            "Each section: piano roll (left) vs tab (right) on one AlphaTab "
+            "transport — Play/Pause, the seek bar, score clicks and roll "
+            "clicks move both views together; use the "
             "Predicted/Actual toggle above the score to compare fingerings.</p>\n"
             + deps
             + "\n<hr>\n".join(sections) + "\n</body></html>\n")

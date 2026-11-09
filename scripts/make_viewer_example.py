@@ -68,7 +68,8 @@ def main():
             "<title>open-fret viewer example</title></head><body>\n"
             "<h2>open-fret viewer example (self-contained)</h2>\n"
             "<p>Needs internet access for CDN scripts + soundfont. "
-            "Left: input MIDI. Right: predicted tab (ground truth shown for demo).</p>\n"
+            "Left: piano roll. Right: predicted tab (ground truth shown for demo). "
+            "One AlphaTab transport drives both views in sync.</p>\n"
             + to_html(bundle, dist_js) + "\n</body></html>\n")
     out = os.path.join(demo, "example_output.html")
     with open(out, "w", encoding="utf-8") as f:

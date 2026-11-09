@@ -20,10 +20,12 @@ inference is involved after the build.
 
 The piano roll is rendered by [WaveRoll](https://github.com/crescent-stdio/wave-roll)
 0.4.0 (`createPianoRoll`, MIT). It supplies the pitch-range view, C-octave
-labels, time grid, zoom/pan and a scrolling playhead; `html-midi-player`
-remains the audio transport so the existing tab transport can drive both.
-It replaced Magenta's `PianoRollSVGVisualizer` (via `html-midi-player`),
-which had no time or pitch axis and stayed blank until playback began.
+labels, time grid, zoom/pan and a scrolling playhead. AlphaTab is the single
+audio source and clock: its `tickPosition` drives the transport seek bar, the
+tab cursor and the roll playhead together, so the views cannot drift apart.
+It replaced Magenta's `PianoRollSVGVisualizer` (previously used via
+`html-midi-player`), which had no time or pitch axis and stayed blank until
+playback began.
 Alternatives considered: `@molecule/app-feature-piano-roll-react` needs
 private Molecule peer packages; `react-piano-roll` and `webaudio-pianoroll`
 are unmaintained editor widgets. Among the candidates reviewed, WaveRoll was
