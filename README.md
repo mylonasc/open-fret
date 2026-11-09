@@ -153,7 +153,12 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Original project code is licensed under the [MIT License](LICENSE). Third-party
+components retain their own terms. **The training dataset and trained weights
+are not automatically covered by this code license.** No express dataset license
+was found in the reviewed `vldsavelyev/guitar_tab` card/repository metadata;
+public/commercial model-release rights are not established. See the
+[dataset licensing review](docs/dataset_licensing.md) before publishing weights.
 
 ## 🙏 Acknowledgments
 
