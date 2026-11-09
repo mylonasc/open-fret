@@ -223,3 +223,14 @@ clean environment. The expanded fixture also passed post-split training-only
 augmentation (16 train / 1 validation / 1 test synthetic windows), resume/reload,
 six-window MIDI and exact independent AlphaTab import. No production HPO,
 retraining, held-out scoring or model release was performed.
+
+Remote CI then exposed a hidden corpus dependency in two viewer tests. That was
+fixed rather than skipping those tests. A `git archive` export of `1e94733`, with
+**no dataset or model directories**, installed only the pinned Node parser and
+passed **165 tests** plus the full CPU fixture in the fresh Python environment.
+The separately generated browser page again imported all 12 exact expected notes
+and passed toggle/seek/playback checks with no page errors.
+[GitHub run 42683709667](https://github.com/mylonasc/open-fret/actions/runs/42683709667)
+also passed the corpus-free check, tests, full fixture and artifact upload.
+Pipeline input identities include Python sources, requirements, the Node parser
+worker and its lockfile so parser/dependency changes cannot silently reuse stages.

@@ -29,7 +29,8 @@ def main():
     parser = AlphaTexParser()
     builder = SequenceBuilder()
     windower = AlignedWindower(max_input_tokens=63, max_target_tokens=63)
-    tmp = tempfile.mkdtemp(prefix="open_fret_smoke_", dir="/tmp/opencode")
+    tmp = tempfile.mkdtemp(prefix="open_fret_smoke_",
+                           dir="/tmp/opencode" if os.path.isdir('/tmp/opencode') else None)
     print(f"Smoke workspace: {tmp}")
     try:
         # 1. Parse fixtures.

@@ -29,7 +29,8 @@ def main():
     if not args.run_name and not args.prepare_only:
         ap.error('Full pipeline requires an explicit --run-name')
     workspace = Path(args.workspace).resolve()
-    code = [ROOT / 'open_fret', ROOT / 'scripts']
+    code = [ROOT / 'open_fret', ROOT / 'scripts', ROOT / 'requirements.txt',
+            ROOT / 'tools/alphatex_parser/parse.cjs', ROOT / 'tools/alphatex_parser/package-lock.json']
     def stage(name, dependencies, command):
         return run_stage(workspace / name, dependencies + code, command, cwd=ROOT)
     raw = stage('raw', [], lambda out: [sys.executable, 'scripts/00_download.py', '--output-dir', str(out)])

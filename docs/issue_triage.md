@@ -1,5 +1,28 @@
 # Baseline acceptance and remaining issues
 
+## Current closure status
+
+- **Completed engineering:** #2–#11, #13, #16–#18. The viewer's private-data test
+  dependency was found by remote CI, fixed in `1e94733`, and checked in a true
+  corpus-free repository export: **165 tests**, complete CPU fixture and browser
+  score completeness/playback all pass. [GitHub CI is green](https://github.com/mylonasc/open-fret/actions/runs/42683709667).
+- **#19 remains open, nonblocking:** family/fingerprint splitting and post-split
+  training-only augmentation are implemented/tested; a new production audit/data
+  rebuild and any clean-family retraining comparison remain separate work. The
+  current model/corpus/panels have not been replaced or reclassified as unseen.
+- **#14/#20/#21 remain open, deferred research:** implemented loss/domain/sampling
+  components are not evidence of matched-budget quality gains. Source-sampling,
+  risk/loss/curriculum ablations and experimental promotion gates are deferred by
+  maintainer direction; no human voice-role annotations are invented.
+- **#12 is untouched**, as requested. Tracking epics #1/#15 remain open for these
+  deliberately unfinished items. No held-out test scoring or model publication
+  was performed.
+
+The sections below preserve the initial audit history. Current implementation
+commands and scope are in [engineering acceptance](engineering_acceptance.md).
+
+## Initial audit history
+
 **Update:** research ablations are deferred by maintainer direction; #12 must
 remain untouched. The identity/duration, full-song, strict encoding and pipeline
 acceptance implementation is documented in [engineering acceptance](engineering_acceptance.md).
