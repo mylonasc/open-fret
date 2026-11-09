@@ -145,7 +145,17 @@ export function TabDataViewer({ bundle }) {
       host.appendChild(player);
       host.appendChild(viz);
       playerRef.current = player;
-      player.addEventListener("load", () => setReady((r) => ({ ...r, midi: true })));
+      player.addEventListener("load", () => {
+        // html-midi-player only hands its note sequence to linked visualizers
+        // on play, leaving the piano roll blank until the user presses play.
+        // Prime it on load so the roll is visible immediately.
+        try {
+          if (player.noteSequence && viz.noteSequence !== player.noteSequence) {
+            viz.noteSequence = player.noteSequence;
+          }
+        } catch (_) {}
+        setReady((r) => ({ ...r, midi: true }));
+      });
       if (player.start === undefined && !customElements.get("midi-player")) {
         addWarn("html-midi-player failed to load (CDN blocked?). MIDI panel disabled.");
       }
