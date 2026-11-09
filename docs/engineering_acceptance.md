@@ -104,3 +104,39 @@ Research ablations (#14/#20 and sampling ablations in #21) are deferred per the
 maintainer. #12 is explicitly untouched. Family-split engineering can proceed
 without retraining or replacing the accepted current baseline; a new training
 comparison is not required for this engineering pass and is not claimed.
+
+## Optuna engineering acceptance
+
+```bash
+python scripts/hpo_optuna.py --fixture-space --trials 2 --max-steps 2 --eval-steps 1 \
+  --pruner none --gpu-monitor-interval 0 --study-name synthetic-acceptance \
+  --storage sqlite:///fixture-study.db --output-root /path/to/new-hpo-output \
+  --cache-dir /path/to/fixture/cache --tokenizer-dir /path/to/fixture/tokenizer
+# Repeat against the same storage/name to resume; --trials is additional trials.
+# Production search omits --fixture-space and uses explicitly bounded budgets.
+python scripts/train_model.py --hpo-config /path/to/new-hpo-output/best_config.json \
+  --run-name chosen-config --tokenizer-dir /path/to/tokenizer --cache-dir /path/to/cache
+```
+
+The real CPU integration test runs two distinct fresh-model trials against a
+persistent SQLite study, checks intermediate reporting, resumes a third trial
+with a threshold pruner, reloads the winning artifacts and passes the exported
+configuration directly into normal training. Explicit training CLI flags override
+the export. Study metadata records data/tokenizer identity, direction, seeds,
+loss components, failures/pruning and step/epoch/time budgets. Changed data/init
+or search protocols require a different study name. A per-device advisory lock
+prevents parallel HPO processes in this user account; unrelated external GPU jobs
+must still be coordinated by the operator. No production HPO or retraining was
+launched for this check.
+
+Final scientific ablations/comparisons remain deferred; held-out final reporting
+and publication are not implied by passing this fixture.
+
+### Recorded verification
+
+On November 9, a **new empty Python 3.12 virtualenv** installed the documented CPU
+wheel and pinned requirements, passed `pip check`, and passed **153 tests**. The
+complete fixture also passed in that clean environment, including independent
+12-note/six-window AlphaTab import. Browser completeness/playback was checked on
+the separately generated fixture. These checks do not claim a remote CI run has
+finished; the committed workflow executes the same acceptance commands.

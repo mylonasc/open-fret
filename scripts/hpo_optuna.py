@@ -67,13 +67,22 @@ def parse_args():
                    help="Seconds between nvidia-smi utilization polls per trial "
                         "(0 disables GPU monitoring).")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument('--fixture-space', action='store_true', help='Tiny CPU acceptance search, not production tuning')
+    p.add_argument('--pruner', choices=['median', 'threshold', 'none'], default='median')
+    p.add_argument('--pruner-warmup-steps', type=int, default=1000)
+    p.add_argument('--prune-threshold', type=float, default=None)
     p.add_argument("--init-from", default=None,
                    help="Optional pretrained T5 endpoint to fine-tune per trial "
                         "instead of training from scratch.")
     return p.parse_args()
 
 
-def suggest(trial):
+def suggest(trial, fixture=False):
+    if fixture:
+        return {'lr': trial.suggest_float('lr', 1e-4, 1e-3, log=True),
+                'dropout': trial.suggest_float('dropout', 0, .1),
+                'warmup_examples': 0, 'decay_after_examples': 10,
+                'decay_factor': .1, 'batch_size': 1, 'grad_accum': 1}
     return {
         "lr": trial.suggest_float("lr", *SPACE["lr"][:2], log=SPACE["lr"][2]),
         "dropout": trial.suggest_float("dropout", *SPACE["dropout"]),
@@ -250,12 +259,16 @@ def objective(trial, args):
     from config import get_tiny_tab_config
     import optuna
 
-    params = suggest(trial)
+    params = suggest(trial, getattr(args, 'fixture_space', False))
     loss_config = loss_config_from_args(args)
     validate_loss_cache(args.cache_dir, loss_config)
     trial.set_user_attr("loss_config", loss_config.to_dict())
+    trial.set_user_attr('seed', args.seed + trial.number)
+    trial.set_user_attr('budget', {'max_steps': args.max_steps, 'max_epochs': args.max_epochs,
+                                   'seconds': args.time_limit, 'objective': 'validation loss',
+                                   'pruner': getattr(args, 'pruner', 'median')})
     eff_batch = params["batch_size"] * params["grad_accum"]
-    warmup_steps = max(1, round(params["warmup_examples"] / eff_batch))
+    warmup_steps = max(0, round(params["warmup_examples"] / eff_batch))
     decay_start = max(warmup_steps + 1,
                       round(params["decay_after_examples"] / eff_batch))
     set_seed(args.seed + trial.number)
@@ -272,7 +285,7 @@ def objective(trial, args):
     train_ds = dataset["train"]
     val_ds = dataset["validation"]
     out_dir = os.path.join(args.output_root, f"trial_{trial.number}")
-    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=False)
     with open(os.path.join(out_dir, "trial_params.json"), "w", encoding="utf-8") as f:
         json.dump({"trial": trial.number, "params": params, "init": init_info,
                    "loss": loss_config.to_dict(),
@@ -327,6 +340,8 @@ def objective(trial, args):
         trial.set_user_attr("max_gpu_mem_mb", gs["max_mem_mb"])
     metrics = trainer.evaluate()
     val_loss = float(metrics.get("eval_loss", float("inf")))
+    trainer.save_model(os.path.join(out_dir, 'final'))
+    tokenizer.save_pretrained(os.path.join(out_dir, 'final'))
 
     history = {"trial": trial.number, "params": params,
                "loss": loss_config.to_dict(),
@@ -377,8 +392,7 @@ def objective(trial, args):
     return val_loss
 
 
-def main():
-    args = parse_args()
+def run_study(args):
     loss_config = loss_config_from_args(args)
     validate_loss_cache(args.cache_dir, loss_config)
     try:
@@ -395,9 +409,18 @@ def main():
               f"vocab={len(tok)}", flush=True)
     except Exception as e:
         raise SystemExit(f"HPO data check failed: {e}")
+    if args.pruner == 'threshold':
+        if args.prune_threshold is None:
+            raise ValueError('--pruner threshold requires --prune-threshold')
+        pruner = optuna.pruners.ThresholdPruner(upper=args.prune_threshold,
+                                                n_warmup_steps=args.pruner_warmup_steps)
+    elif args.pruner == 'none':
+        pruner = optuna.pruners.NopPruner()
+    else:
+        pruner = optuna.pruners.MedianPruner(n_warmup_steps=args.pruner_warmup_steps)
     study = optuna.create_study(study_name=args.study_name, storage=args.storage,
-                                load_if_exists=True, direction="minimize",
-                                 pruner=optuna.pruners.MedianPruner(n_warmup_steps=1000))
+                                load_if_exists=True, direction='minimize', pruner=pruner,
+                                sampler=optuna.samplers.TPESampler(seed=args.seed))
     stored_loss = study.user_attrs.get("loss_config")
     if stored_loss is None and study.trials:
         stored_loss = LossConfig().to_dict()
@@ -409,13 +432,52 @@ def main():
     if stored_metadata is not None and stored_metadata != metadata:
         raise ValueError("Study tokenizer/pitch metadata differs; use a new study name")
     study.set_user_attr("token_metadata", metadata)
-    study.optimize(lambda t: objective(t, args), n_trials=args.trials,
-                   timeout=args.timeout)
+    provenance = {'train_fingerprint': ds['train']._fingerprint,
+                  'validation_fingerprint': ds['validation']._fingerprint,
+                  'seed': args.seed, 'init_from': args.init_from, 'fixture_space': args.fixture_space}
+    previous = study.user_attrs.get('data_protocol')
+    if previous is not None and previous != provenance:
+        raise ValueError('Study data/init/search protocol differs; use a new study name')
+    study.set_user_attr('data_protocol', provenance)
+    def guarded_objective(trial):
+        import gc
+        import torch
+        try:
+            return objective(trial, args)
+        except Exception as e:
+            trial.set_user_attr('failure', f'{type(e).__name__}: {e}')
+            raise
+        finally:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    study.optimize(guarded_objective, n_trials=args.trials, timeout=args.timeout,
+                    catch=(RuntimeError,), gc_after_trial=True, n_jobs=1)
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    os.makedirs(args.output_root, exist_ok=True)
+    with open(os.path.join(args.output_root, 'study_summary.json'), 'w') as f:
+        json.dump({'study': args.study_name, 'direction': 'minimize', 'data_protocol': provenance,
+                   'requested_budget': vars(args), 'trials': [dict(number=t.number, state=t.state.name,
+                    value=t.value, params=t.params, user_attrs=t.user_attrs) for t in study.trials]}, f, indent=2)
+    if not completed:
+        print('No completed trials; study_summary.json records failures/pruning, no winner exported')
+        return
     print(f"Best value: {study.best_value:.4f} params: {study.best_params}")
     best_path = os.path.join(args.output_root, "best_config.json")
     os.makedirs(args.output_root, exist_ok=True)
     with open(best_path, "w", encoding="utf-8") as f:
-        json.dump({"params": study.best_params, "value": study.best_value,
+        selected = study.best_trial.user_attrs['params_json']
+        effective = selected['batch_size'] * selected['grad_accum']
+        training_args = {key: selected[key] for key in ('lr', 'dropout', 'batch_size', 'grad_accum', 'decay_factor')}
+        training_args.update(warmup_steps=max(0, round(selected['warmup_examples'] / effective)),
+                             decay_start_step=max(max(0, round(selected['warmup_examples'] / effective)) + 1,
+                                                  round(selected['decay_after_examples'] / effective)),
+                             seed=args.seed, init_from=args.init_from)
+        training_args.update(pitch_loss_alpha=loss_config.pitch_alpha,
+                             equivalence_smoothing=loss_config.smoothing,
+                             ce_loss_weight=loss_config.ce_weight, event_type_alpha=loss_config.type_alpha,
+                             conditional_pitch=loss_config.conditional_pitch)
+        json.dump({"params": selected, "training_args": training_args, "value": study.best_value,
                    "loss": loss_config.to_dict(),
                    "study": args.study_name, "init_from": args.init_from,
                    "user_attrs": study.best_trial.user_attrs}, f, indent=2)
@@ -442,6 +504,21 @@ def main():
                     f"{a.get('train_samples_per_second', '')},"
                     f"{a.get('oom', '')}\n")
     print(f"Wrote {summary_path} (batch vs memory vs stability).")
+
+
+def main():
+    import fcntl
+    import torch
+    import tempfile
+    args = parse_args()
+    root = '/tmp/opencode' if os.path.isdir('/tmp/opencode') else tempfile.gettempdir()
+    device = str(getattr(torch.cuda.get_device_properties(0), 'uuid', 'cuda0')) if torch.cuda.is_available() else 'cpu'
+    with open(os.path.join(root, f'open-fret-hpo-{os.getuid()}-{device}.lock'), 'a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f'Another Open-Fret HPO process holds the {device} resource lock')
+        run_study(args)
 
 
 if __name__ == "__main__":

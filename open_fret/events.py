@@ -83,6 +83,8 @@ def tab_attacks(tokens):
 def validate_fingerings(notes, tuning, capo=0, max_fret=24):
     seen, active = set(), {}
     for note in sorted(notes, key=lambda n: (n["start"], str(n["id"]))):
+        if any(not isinstance(note[k], int) for k in ('start', 'end', 'pitch', 'string', 'fret')):
+            raise ValueError("Note timing, pitch, string and fret must be integer values")
         if note["id"] in seen:
             raise ValueError("Duplicate note identity")
         seen.add(note["id"])

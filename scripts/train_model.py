@@ -274,6 +274,7 @@ def parse_args():
     p.add_argument("--optuna-storage", default=None,
                    help="Optional persistent Optuna storage for this fixed-config full run.")
     p.add_argument("--optuna-study-name", default=None)
+    p.add_argument('--hpo-config', help='best_config.json from HPO; explicit CLI flags take precedence')
     add_loss_arguments(p)
     p.add_argument("--tokenizer-dir", default="dataset/processed/tab_tokenizer")
     p.add_argument("--cache-dir", default="dataset/processed/cached_dataset")
@@ -335,7 +336,17 @@ def parse_args():
     p.add_argument("--sample-decoding-mode", choices=["anchored", "legacy"], default="anchored")
     p.add_argument("--val-files", default="dataset/processed/val_files.txt",
                    help="Split list used to pick the fixed sample songs.")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.hpo_config:
+        with open(args.hpo_config, encoding='utf-8') as f:
+            selected = json.load(f)['training_args']
+        explicit = {token.split('=')[0] for token in sys.argv[1:] if token.startswith('--')}
+        for key, value in selected.items():
+            if not hasattr(args, key):
+                raise ValueError(f'Unsupported exported training argument: {key}')
+            if '--' + key.replace('_', '-') not in explicit:
+                setattr(args, key, value)
+    return args
 
 
 def train(args=None):

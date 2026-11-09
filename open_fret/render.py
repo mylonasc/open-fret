@@ -163,6 +163,7 @@ class TabRenderer:
         """
         if isinstance(tokens, str):
             tokens = tokens.split()
+        self._validate_tokens(tokens)
         chords, gaps = self._collect_chords(tokens)
         # Header format mirrors upstream guitartab (vladsavelyev) output:
         # quoted title/track names are required — bare \track is rejected
@@ -250,11 +251,27 @@ class TabRenderer:
             return note_strs[0]
         return "(" + " ".join(note_strs) + ")"
 
+    def _validate_tokens(self, tokens):
+        from .alphatex import parse_tuning
+        from .events import tab_attacks
+        count = len(parse_tuning(self.tuning_str))
+        used = set()
+        for note in tab_attacks(tokens):
+            if not 1 <= note['string'] <= count or not 0 <= note['fret'] <= 24:
+                raise ValueError("Tab string/fret is outside supported tuning/range")
+            key = (note['start'], note['string'])
+            if key in used:
+                raise ValueError("Same-onset string conflict cannot be rendered faithfully")
+            used.add(key)
+
     def to_ascii(self, tokens) -> str:
         if isinstance(tokens, str):
             tokens = tokens.split()
+        self._validate_tokens(tokens)
         self._collect_chords(tokens)  # validate rather than silently dropping syntax
-        strings: dict[int, list[str]] = {i: [] for i in range(1, 7)}
+        from .alphatex import parse_tuning
+        tuning = parse_tuning(self.tuning_str)
+        strings: dict[int, list[str]] = {i: [] for i in range(1, len(tuning) + 1)}
         # Build columns: each onset (chord) is one column across all strings.
         cur_chord: dict[int, str] = {}
         pending_dashes = 0
@@ -270,7 +287,7 @@ class TabRenderer:
                 return
             width = max([len(v) for v in cur_chord.values()] + [1])
             width = max(width, 1)
-            for s in range(1, 7):
+            for s in strings:
                 cell = cur_chord.get(s, "-")
                 strings[s].append(cell.ljust(width, "-"))
             if pending_dashes > 0:
@@ -308,5 +325,6 @@ class TabRenderer:
                 elif s_idx in strings:
                     cur_chord[s_idx] = f"{fret}{tech}"
         flush_chord()
-        names = {1: "e", 2: "B", 3: "G", 4: "D", 5: "A", 6: "E"}
-        return "\n".join(f"{names[i]}|{''.join(strings[i])}" for i in range(1, 7))
+        names = ['e', 'B', 'G', 'D', 'A', 'E'] if tuning == [64, 59, 55, 50, 45, 40] else [str(i) for i in strings]
+        width = max(map(len, names))
+        return "\n".join(f"{names[i-1].rjust(width)}|{''.join(strings[i])}" for i in strings)

@@ -93,6 +93,18 @@ def test_complete_song_chunking_preserves_ticks_and_sustains(setup):
     actual = first['correction']['corrected_notes']
     assert [(n['id'], n['start'], n['end'], n['pitch']) for n in actual] == [
         (n['id'], n['start'], n['end'], n['pitch']) for n in notes]
+    with pytest.raises(ValueError, match='No pitched notes'):
+        transcribe_notes(model, tok, [])
+
+
+def test_inference_missing_model_is_actionable(tmp_path):
+    import os
+    import subprocess
+    completed = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'scripts/inference.py'),
+                                '--midi', str(tmp_path / 'song.mid'), '--model', str(tmp_path / 'missing-model')],
+                               env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''}, capture_output=True, text=True, timeout=30)
+    assert completed.returncode != 0
+    assert 'Could not load tokenizer' in completed.stderr
 
 
 def test_silence_multi_instrument_selection_and_drum_policy(tmp_path):

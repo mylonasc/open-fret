@@ -21,6 +21,9 @@
 
 ## 🚀 Getting Started
 
+For the tested CPU setup, real end-to-end fixture and full-song inference
+contract, see [engineering acceptance](docs/engineering_acceptance.md).
+
 ### 1. Installation
 
 Clone the repository and install the dependencies:

@@ -14,15 +14,15 @@ def read_midi_notes(midi_path: str, target_resolution: int = 480, instrument=Non
     if midi.type == 2:
         raise ValueError("Asynchronous type-2 MIDI is unsupported")
     scale = target_resolution / midi.ticks_per_beat
-    groups, tempi = {}, {500000}
-    observed_tempi = set()
+    groups = {}
+    tempo_events = []
     for track_index, track in enumerate(midi.tracks):
         tick, ordinal, programs = 0, 0, defaultdict(int)
         active = defaultdict(deque)
         for msg in track:
             tick += msg.time
             if msg.type == 'set_tempo':
-                observed_tempi.add(msg.tempo)
+                tempo_events.append((tick, msg.tempo))
             elif msg.type == 'program_change':
                 programs[msg.channel] = msg.program
             elif msg.type == 'control_change' and msg.control == 64 and msg.value >= 64:
@@ -47,6 +47,9 @@ def read_midi_notes(midi_path: str, target_resolution: int = 480, instrument=Non
                     queue.popleft()['end'] = int(round(tick * scale))
         if any(active.values()):
             raise ValueError(f"Unterminated MIDI notes in track {track_index}")
+    observed_tempi = {tempo for _, tempo in tempo_events}
+    if tempo_events and min(tick for tick, _ in tempo_events) > 0:
+        observed_tempi.add(500000)  # implicit tempo before the first event
     if len(observed_tempi) > 1:
         raise ValueError("Variable-tempo MIDI is unsupported by single-tempo tab exports")
     tempo = next(iter(observed_tempi), 500000)
