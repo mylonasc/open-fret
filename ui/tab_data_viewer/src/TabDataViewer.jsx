@@ -4,6 +4,26 @@ import { createRoot } from "react-dom/client";
 
 const SOUNDFONT_URL =
   "https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0/dist/soundfont/sonivox.sf2";
+
+function embeddedSoundFontUrl() {
+  // Notebook/offline embedding (open_fret.viewer inline_deps): the page
+  // creates a blob URL from the vendored soundfont at load time.
+  try {
+    const url = window.__OFV_SOUNDFONT_URL;
+    if (typeof url === "string" && url.startsWith("blob:")) return url;
+  } catch (_) {}
+  return null;
+}
+
+function embeddedScriptFile() {
+  // AlphaTab's worker bootstrap needs a real script URL; the inline loader
+  // (inline_deps pages) stashes a data: URL here. CDN pages use detection.
+  try {
+    const url = window.__OFV_AT_SCRIPT_URL;
+    if (typeof url === "string" && url.length > 100) return url;
+  } catch (_) {}
+  return null;
+}
 const PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function tokensToNotes(tokens) {
@@ -415,14 +435,25 @@ export function TabDataViewer({ bundle }) {
     }
     let api = null;
     try {
-      api = new AT.AlphaTabApi(el, {
+      const scriptFile = embeddedScriptFile();
+      const options = {
         player: {
-          soundFont: SOUNDFONT_URL,
+          soundFont: embeddedSoundFontUrl() || SOUNDFONT_URL,
           enablePlayer: true,
           enableCursor: true,
           scrollElement: tabScrollRef.current || el,
         },
-      });
+      };
+      // Offline/blob-loaded AlphaTab cannot detect its own script file for
+      // the render worker; the inline page supplies a data: URL instead.
+      if (scriptFile) {
+        options.core = { scriptFile };
+        // Reliability over latency offline: ScriptProcessor output needs no
+        // worklet module loading (WebAudioScriptProcessor = 1); the CDN
+        // default keeps audio worklets.
+        options.player.outputMode = 1;
+      }
+      api = new AT.AlphaTabApi(el, options);
       apiRef.current = api;
       try {
         el._ofvApi = api;

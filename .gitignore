@@ -18,5 +18,9 @@ node_modules/
 !tools/alphatex_parser/package-lock.json
 !website/package.json
 !website/package-lock.json
+!ui/tab_data_viewer/vendor/Bravura-OFL.txt
 website/build/
 website/.docusaurus/
+# Generated at Pages-deploy time by scripts/build_pages_demo.py (CI);
+# never commit: reproducible synthetic fixture, not source.
+website/static/examples/synthetic/

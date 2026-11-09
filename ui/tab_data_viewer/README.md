@@ -73,6 +73,12 @@ bundle = build_view_bundle(midi_tokens=[...], tab_tokens=[...])
 show(bundle)   # needs npm run build to have been run once
 ```
 
+`show()` inlines vendored AlphaTab/WaveRoll/Bravura/SONiVOX blobs
+(`ui/tab_data_viewer/vendor/`, pinned to the CDN versions), so the viewer —
+notation, piano roll, cursor, audio — works fully offline. Pass
+`inline_deps=False` for the smaller CDN-tagged variant. `to_html(...,
+inline_deps=True)` produces the same standalone page for static hosting.
+
 ## Status
 
 Browser-verified with headless Chrome (Playwright, `e2e_check.py` in this
@@ -89,5 +95,6 @@ fixed:
 4. our AlphaTex header was rejected by AlphaTab's importer: blocks are
    line-oriented and `\track` needs a quoted name (header now mirrors the
    upstream guitartab format).
-- Audio depends on CDN + soundfont reachability; offline use falls back to
-  token inspectors with a warning banner.
+- Audio depends on CDN + soundfont reachability in CDN mode; inline mode
+  (`show()` default) plays fully offline from the vendored blobs. Token
+  inspectors always render, with a warning banner on failure.

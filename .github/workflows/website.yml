@@ -1,0 +1,67 @@
+name: Publish documentation website
+
+on:
+  push:
+    branches: [main, first-working-training-loop]
+    paths:
+      - '.github/workflows/website.yml'
+      - 'website/**'
+      - 'scripts/build_pages_demo.py'
+      - 'open_fret/viewer.py'
+      - 'open_fret/render.py'
+      - 'ui/tab_data_viewer/dist/**'
+      - 'ui/tab_data_viewer/THIRD_PARTY_NOTICES.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install numpy==2.5.4 pretty_midi==0.2.11.post0 mido==1.3.3
+      - uses: actions/configure-pages@v5
+      - name: Build synthetic demo into the site
+        # Synthetic-only fixture (no corpus/model); lands at /examples/synthetic/.
+        run: |
+          python scripts/build_pages_demo.py --output-dir "$RUNNER_TEMP/open-fret-pages"
+          mkdir -p website/static/examples/synthetic
+          cp "$RUNNER_TEMP/open-fret-pages/examples/player.html" website/static/examples/synthetic/index.html
+          cp "$RUNNER_TEMP/open-fret-pages/examples/example.mid" website/static/examples/synthetic/
+          cp "$RUNNER_TEMP/open-fret-pages/examples/predicted.tex" website/static/examples/synthetic/
+          cp "$RUNNER_TEMP/open-fret-pages/examples/reference.tex" website/static/examples/synthetic/
+          ls website/static/examples/synthetic
+      - name: Install website dependencies
+        run: npm ci --prefix website
+      - name: Build website
+        run: npm run build --prefix website
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/build
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

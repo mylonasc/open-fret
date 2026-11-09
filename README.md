@@ -21,11 +21,15 @@
 
 ---
 
-## 🌐 Live viewer demo
+## 🌐 Live site & demo
 
-[**Open the interactive example →**](https://mylonasc.github.io/open-fret/examples/player.html)
+[**📖 Documentation website →**](https://mylonasc.github.io/open-fret/) —
+motivation, dataset pipeline, loss definitions, HPO insights, training info,
+and playable examples with real model predictions.
 
-A static GitHub Pages page renders a playable, seekable AlphaTab score next to a
+[**▶ Synthetic demo →**](https://mylonasc.github.io/open-fret/examples/synthetic/)
+
+A static page rendering a playable, seekable AlphaTab score next to a
 MIDI piano roll, with a predicted/actual fingering toggle. It uses a hand-authored
 synthetic fixture; no corpus audio or reference annotations from a corpus are
 published there (model weights are released separately on

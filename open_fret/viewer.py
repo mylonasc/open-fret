@@ -191,6 +191,8 @@ def build_view_bundle(midi_path=None, midi_tokens=None, tab_tokens=None,
 
 ALPHATAB_JS = ("https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0"
                "/dist/alphaTab.min.js")
+SOUNDFONT_URL = ("https://cdn.jsdelivr.net/npm/@coderline/alphatab@1.3.0"
+                 "/dist/soundfont/sonivox.sf2")
 # Rendering-only piano roll (MIT): grid, note rectangles and playhead.
 # AlphaTab owns the single audio/clock transport; the roll follows its tick
 # position. Pinned: UMD global names and config are version-specific.
@@ -198,7 +200,38 @@ WAVE_ROLL_JS = ("https://cdn.jsdelivr.net/npm/wave-roll@0.4.0"
                 "/dist/wave-roll.umd.js")
 
 
-def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
+# Rendering-only piano roll (MIT): grid, note rectangles and playhead.
+# AlphaTab owns the single audio/clock transport; the roll follows its tick
+# position. Pinned: UMD global names and config are version-specific.
+WAVE_ROLL_JS = ("https://cdn.jsdelivr.net/npm/wave-roll@0.4.0"
+                "/dist/wave-roll.umd.js")
+# Offline copies for notebook embedding (see scripts/vendor_viewer_js.py).
+# Same bytes as the CDN pins above; licenses travel with the files.
+VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "ui", "tab_data_viewer", "vendor")
+VENDOR_FILES = ("alphaTab.min.js", "wave-roll.umd.js", "sonivox.sf2")
+
+
+def _vendor_bytes(name):
+    path = os.path.join(VENDOR_DIR, name)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Missing vendored blob {path}. Run scripts/vendor_viewer_js.py.")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _vendor_js(name):
+    return _vendor_bytes(name).decode("utf-8")
+
+
+def _vendor_b64(name):
+    import base64
+    return base64.b64encode(_vendor_bytes(name)).decode("ascii")
+
+
+def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True,
+            inline_deps=False):
     """Render a self-contained viewer HTML string for notebook/page embedding.
 
     ``dist_js`` is the built UMD bundle text (reads
@@ -209,6 +242,11 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
     on a page that already includes the CDN scripts + dist bundle once —
     re-executing the dist bundle remounts React roots and wastes bandwidth.
     See ``scripts/make_run_viewer.py``.
+
+    Pass ``inline_deps=True`` to embed the vendored AlphaTab/WaveRoll/soundfont
+    blobs instead of ``<script src>`` CDN tags: the page then needs no network
+    at all (notebooks, offline review). Web pages keep the CDN default so
+    pages stay small and cache-shared.
     """
     uid = uuid.uuid4().hex[:8]
     # json.dumps never emits "</script>", but TAB/AlphaTex text is
@@ -220,12 +258,54 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
     if with_deps:
         if dist_js is None:
             raise ValueError("dist_js is required when with_deps=True.")
-        deps = (f'<script src="{WAVE_ROLL_JS}"></script>\n'
-                f'<script src="{ALPHATAB_JS}"></script>\n'
+        if inline_deps:
+            # Zero-network page: pre-create AlphaTab's style element (id
+            # alphaTabStyle) so it never derives blob: font URLs from the
+            # blob-loaded script; WaveRoll executes inline (no script-file
+            # detection needed); the render worker bootstraps from an
+            # importScripts(data:) URL which works where blob: fails; the
+            # soundfont ships as a blob URL. The mount waits on __OFV_READY.
+            # MusicFontSize 34 matches the vendored AlphaTab 1.3.0 default.
+            style_css = ("@font-face{font-family:'alphaTab';"
+                         f"src:url(data:font/woff2;base64,{_vendor_b64('Bravura.woff2')})"
+                         " format('woff2');font-weight:normal;font-style:normal;}"
+                         ".at-surface *{cursor:default;vertical-align:top;overflow:visible;}"
+                         ".at-surface-svg text{dominant-baseline:central;}"
+                         ".at{font-family:'alphaTab';speak:none;font-style:normal;font-weight:normal;"
+                         "font-variant:normal;text-transform:none;line-height:1;"
+                         "-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;"
+                         "font-size:34px;overflow:visible !important;}")
+            deps = (
+                f"<style id=\"alphaTabStyle\">{style_css}</style>\n"
+                f"<script>\n{_vendor_js('wave-roll.umd.js')}\n</script>\n"
+                f"<script>\nwindow.__OFV_AT_SRC=\"{_vendor_b64('alphaTab.min.js')}\";\n</script>\n"
+                "<script>\n"
+                "(function(){\n"
+                "function b64Bytes(b){var s=atob(b);var u=new Uint8Array(s.length);"
+                "for(var i=0;i<s.length;i++)u[i]=s.charCodeAt(i);return u;}\n"
+                "function load(src){return new Promise(function(res,rej){"
+                "var el=document.createElement('script');"
+                "el.onload=function(){res();};"
+                "el.onerror=function(){rej(new Error('script load failed: '+src));};"
+                "el.src=src;document.head.appendChild(el);});}\n"
+                f"window.__OFV_SOUNDFONT_URL=URL.createObjectURL(new Blob([b64Bytes(\"{_vendor_b64('sonivox.sf2')}\")],{{type:'audio/x-soundfont'}}));\n"
+                "// data: URL for the render worker: importScripts(data:) works where\n"
+                "// importScripts(blob:) fails (opaque origins). Execution below still\n"
+                "// uses a blob: script tag, which is a proven pattern.\n"
+                "window.__OFV_AT_SCRIPT_URL='data:text/javascript;base64,'+window.__OFV_AT_SRC;\n"
+                "window.__OFV_READY=load(URL.createObjectURL(new Blob([b64Bytes(window.__OFV_AT_SRC)],{type:'text/javascript'})));\n"
+                "window.__OFV_AT_SRC=null;\n"
+                "})();\n"
+                "</script>\n"
                 f"<script>\n{dist_js}\n</script>\n")
+        else:
+            deps = (f'<script src="{WAVE_ROLL_JS}"></script>\n'
+                    f'<script src="{ALPHATAB_JS}"></script>\n'
+                    f"<script>\n{dist_js}\n</script>\n")
+    ready = "(window.__OFV_READY||Promise.resolve())"
     return f"""{deps}<div id="ofv-{uid}" class="ofv-root"></div>
 <script>
-(function() {{
+{ready}.then(function() {{
   if (!window.{mount_name}) {{
     document.getElementById("ofv-{uid}").innerHTML =
       "<p><b>Viewer bundle failed to load.</b> "
@@ -244,12 +324,21 @@ def to_html(bundle, dist_js=None, mount_name="TabDataViewer", with_deps=True):
       "<p><b>Viewer failed to start:</b> " + String(err) + "</p>";
     console.error(err);
   }}
-}})();
+}}).catch(function(err) {{
+  document.getElementById("ofv-{uid}").innerHTML =
+    "<p><b>Viewer runtime failed to load:</b> " + String(err) + "</p>";
+  console.error(err);
+}});
 </script>"""
 
 
-def show(bundle_or_path, dist_path=None):
-    """Display a bundle in a Jupyter cell. Returns an IPython HTML object."""
+def show(bundle_or_path, dist_path=None, inline_deps=True):
+    """Display a bundle in a Jupyter cell. Returns an IPython HTML object.
+
+    ``inline_deps=True`` (default) embeds the vendored AlphaTab/WaveRoll/
+    soundfont blobs so the viewer works with no CDN access; pass False for
+    the smaller CDN-tagged variant.
+    """
     from IPython.display import HTML
     if isinstance(bundle_or_path, str):
         with open(bundle_or_path, encoding="utf-8") as f:
@@ -265,4 +354,4 @@ def show(bundle_or_path, dist_path=None):
         dist_path = os.path.join(dist_dir, cands[0])
     with open(dist_path, encoding="utf-8") as f:
         dist_js = f.read()
-    return HTML(to_html(bundle, dist_js))
+    return HTML(to_html(bundle, dist_js, inline_deps=inline_deps))

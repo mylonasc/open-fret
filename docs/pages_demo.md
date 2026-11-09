@@ -1,22 +1,22 @@
-# Hosted viewer demo (GitHub Pages)
+# Hosted synthetic demo (served from the documentation site)
 
-Live page: <https://mylonasc.github.io/open-fret/examples/player.html>
+Live page: <https://mylonasc.github.io/open-fret/examples/synthetic/>
 
 The page proves that the interactive viewer works as a static site: AlphaTab
 notation and playback, a MIDI piano roll, click-to-seek, zoom, and the
 predicted/actual toggle all run in the browser. No Python, GPU, or model
-inference is involved after the build.
+inference is involved after the build. It is built by
+`scripts/build_pages_demo.py` and deployed as part of the documentation site
+(`website/static/examples/synthetic/`).
 
 ## What is published
 
-| File | Content |
+| File (under `examples/synthetic/`) | Content |
 | --- | --- |
-| `examples/player.html` | Viewer bundle inlined, synthetic example data |
-| `examples/example.mid` | Source MIDI for the demo phrase |
-| `examples/predicted.tex` | First fingering (AlphaTex) |
-| `examples/reference.tex` | Pitch-equivalent alternative fingering |
-| `licenses.html` | Project license plus bundled and runtime components |
-| `demo-manifest.json` | Provenance, note count, and publication flags |
+| `index.html` | Viewer bundle inlined, synthetic example data |
+| `example.mid` | Source MIDI for the demo phrase |
+| `predicted.tex` | First fingering (AlphaTex) |
+| `reference.tex` | Pitch-equivalent alternative fingering |
 
 The piano roll is rendered by [WaveRoll](https://github.com/crescent-stdio/wave-roll)
 0.4.0 (`createPianoRoll`, MIT). It supplies the pitch-range view, C-octave
@@ -61,10 +61,13 @@ fingering, and the overwrite guard.
 
 ## Deployment
 
-`.github/workflows/pages-demo.yml` builds the page on Ubuntu, uploads it as a
-Pages artifact, and deploys with `actions/deploy-pages`. The workflow installs
-only the small I/O dependencies (`numpy`, `pretty_midi`, `mido`), so it never
-downloads a corpus or model.
+The documentation site (`.github/workflows/website.yml`) builds the
+Docusaurus site on Ubuntu, copies the synthetic demo above into
+`website/static/examples/synthetic/`, uploads `website/build` as a Pages
+artifact, and deploys with `actions/deploy-pages`. The workflow installs only
+the small I/O dependencies (`numpy`, `pretty_midi`, `mido`) for the synthetic
+demo plus the website's `npm ci`, so it never downloads a corpus or model.
+The old `examples/player.html` URL keeps working via a static redirect page.
 
 Pages is configured with `build_type: workflow`. The `github-pages` environment
 allows the `main` and `first-working-training-loop` branches; remove the latter

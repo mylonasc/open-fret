@@ -100,8 +100,8 @@ const config = {
                 href: 'https://github.com/mylonasc/open-fret',
               },
               {
-                label: 'Interactive demo',
-                href: 'https://mylonasc.github.io/open-fret/examples/player.html',
+                label: 'Synthetic demo',
+                href: 'https://mylonasc.github.io/open-fret/examples/synthetic/',
               },
             ],
           },

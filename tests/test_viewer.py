@@ -1,5 +1,11 @@
 import base64
+import os
+import re
+import shutil
+import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -84,3 +90,46 @@ def test_to_html_contains_mount_points():
     assert "midi-player" not in html
     assert "/* fake bundle */" in html
     assert "AAA=" in html
+
+
+def test_to_html_inline_deps_has_no_network():
+    from open_fret.viewer import VENDOR_DIR, VENDOR_FILES
+    for name in VENDOR_FILES:
+        assert os.path.isfile(os.path.join(VENDOR_DIR, name)), name
+    bundle = {"title": "t", "midi_b64": "AAA=", "alpha_tex": "x",
+              "input_tokens": [], "tab_tokens": [],
+              "meta": {}, "tempo": 120, "ticks_per_beat": 480}
+    with open(os.path.join(VENDOR_DIR, "wave-roll.umd.js"),
+              encoding="utf-8") as f:
+        marker = "WaveRoll" if "WaveRoll" in f.read(1 << 20) else "wave-roll"
+    html = to_html(bundle, dist_js="/* fake bundle */", inline_deps=True)
+    assert "<script src=" not in html
+    assert "cdn.jsdelivr" not in html
+    assert marker in html
+    assert "window.__OFV_AT_SRC" in html
+    assert "window.__OFV_SOUNDFONT_URL" in html
+    assert "window.__OFV_READY" in html
+    assert "@font-face" in html and "font-family:'alphaTab'" in html
+    assert 'id="alphaTabStyle"' in html
+    assert html.count('id="alphaTabStyle"') == 1
+    assert "neuterBrokenFontFace" not in html
+    assert "/* fake bundle */" in html
+
+
+def test_to_html_inline_loader_is_valid_javascript(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to syntax-check the emitted loader")
+    from open_fret.viewer import to_html
+    bundle = {"title": "t", "midi_b64": "AAA=", "alpha_tex": "x",
+              "input_tokens": [], "tab_tokens": [],
+              "meta": {}, "tempo": 120, "ticks_per_beat": 480}
+    html = to_html(bundle, dist_js="/* fake bundle */", inline_deps=True)
+    blocks = re.findall(r"<script>\n\(function\(\)\{.*?\n\}\)\(\);\n</script>",
+                        html, re.DOTALL)
+    assert len(blocks) == 1, "expected exactly one loader IIFE block"
+    loader = blocks[0].replace("<script>\n", "", 1).rsplit("\n</script>", 1)[0]
+    probe = tmp_path / "loader.js"
+    probe.write_text(loader, encoding="utf-8")
+    subprocess.run([node, "--check", str(probe)], check=True,
+                   capture_output=True, text=True)
