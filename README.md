@@ -133,9 +133,35 @@ Open-Fret strictly follows the base architecture defined in the research paper:
 ---
 
 ## 📊 Datasets
-The project utilizes the following data sources for training and evaluation:
-- **[vladsavelyev/guitar_tab](https://huggingface.co/datasets/vldsavelyev/guitar_tab)**: A massive corpus of ~188k GuitarPro tracks converted to AlphaTex format. This serves as our primary training database for large-scale generalization.
-- **DadaGP/SynthTab Alignment**: While the [Fretting-Transformer paper](https://arxiv.org/abs/2506.14223) focuses on a curated subset (Acoustic, Beginner, and Jazz), this implementation leverages the broader `vladsavelyev` corpus to provide a more robust and versatile model.
+
+**The current model uses one documented real training corpus:
+[`vldsavelyev/guitar_tab`](https://huggingface.co/datasets/vldsavelyev/guitar_tab).**
+It contains GuitarPro tablatures converted to AlphaTex. Upstream reports 47,299
+source files in its default configuration and 188,297 track records in its `all`
+configuration; these are different units, not two datasets. Parser acceptance,
+windowing and augmentation determine the processed example counts.
+
+- **Current run:** `full-curated-3ep-20261109` uses the
+  `loss-v4-curated-20261109` cache: 843,886 training windows and 105,394 validation
+  windows. These are not counts of independent songs. Its recorded initialization
+  is from scratch (`init_from: null`). See the [run documentation](docs/full_combined_run.md).
+- **Processing versions:** `loss-v3` and `loss-v4-curated` are processing/cache
+  versions of the same corpus, not additional data sources.
+- **Not used here:** DadaGP and SynthTab are not ingested by the current training
+  pipeline. Earlier README references mixed research-paper context with this
+  implementation's actual inputs. This project does not reproduce the
+  [Fretting-Transformer paper's](https://arxiv.org/abs/2506.14223) data protocol,
+  and no cross-dataset quality advantage has been established.
+
+**Historical clarification:** the downloader already selected `vldsavelyev/guitar_tab`
+in the initial commit (`8b792f7`), despite the original README claiming
+DadaGP/SynthTab. Commit `6636893` revised the dataset description but did not
+change the downloader. The available Git history does not establish an actual
+switch from those datasets or document a controlled comparison justifying this
+corpus choice.
+
+Dataset/model publication rights remain unresolved; see the
+[licensing review](docs/dataset_licensing.md). Public availability is not a license.
 
 ---
 
