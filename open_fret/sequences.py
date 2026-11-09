@@ -116,12 +116,15 @@ class SequenceBuilder:
                       track_index: int = 0, window_index: int = 0) -> SequenceExample:
         steps, tuning = self.build_steps(track, capo=capo)
         midi_tokens, tab_tokens = self.steps_to_tokens(steps, tuning, capo=capo)
-        start_tick = steps[0].time if steps else 0
+        start_tick = 0  # steps_to_tokens preserves silence from absolute origin
         end_tick = steps[-1].time if steps else 0
         return SequenceExample(
             midi_tokens=midi_tokens, tab_tokens=tab_tokens, source=source,
             track_index=track_index, window_index=window_index,
             start_tick=start_tick, end_tick=end_tick, capo=capo, tuning=list(tuning),
+            notes=[{'id': f'{source}:{track_index}:{n.note_id}', 'start': n.start,
+                    'end': n.end, 'pitch': n.pitch, 'string': n.string, 'fret': n.fret,
+                    'tech': n.tech, 'voice': n.voice} for step in steps for n in step.ons],
         )
 
 

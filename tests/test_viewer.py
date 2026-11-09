@@ -44,13 +44,9 @@ def test_midi_bytes_roundtrip():
 
 
 def _sample_window():
-    import json
-    for f in sorted(Path("dataset/processed/individual").glob("*.json")):
-        d = json.loads(f.read_text())
-        if (len(d["midi"]) > 80 and len(d["midi"]) < 400
-                and d.get("tuning", [64])[0] == 64):
-            return d
-    raise AssertionError("no suitable sample window found")
+    # Redistributable, self-contained fixture; never read a git-ignored corpus.
+    return {'midi': 'CAPO_0 TUNING_64_59_55_50_45_40 NO_64 NO_59 TS_240 NF_64 NF_59 TS_120 NO_67 TS_480 NF_67'.split(),
+            'tab': 'TAB_1_0 TAB_2_0 TS_360 TAB_1_3 TS_480'.split()}
 
 
 def test_build_view_bundle_from_tokens():

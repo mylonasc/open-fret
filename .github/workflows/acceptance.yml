@@ -8,6 +8,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: ''
       OMP_NUM_THREADS: '2'
       MKL_NUM_THREADS: '2'
+      ALPHATAB_JS: ${{ github.workspace }}/tools/alphatex_parser/node_modules/@coderline/alphatab/dist/alphaTab.js
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,13 +23,16 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python -m pip check
       - run: npm ci --prefix tools/alphatex_parser
-      - run: python -m pytest tests/ -q
+      - name: Assert corpus-free checkout
+        run: test ! -d dataset/processed && test ! -d models
+      - run: python -m pytest tests/ -q --junitxml="$RUNNER_TEMP/pytest.xml"
       - run: python scripts/run_pipeline.py --fixture --workspace "$RUNNER_TEMP/open-fret-fixture"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: synthetic-cpu-acceptance
           path: |
+            ${{ runner.temp }}/pytest.xml
             ${{ runner.temp }}/open-fret-fixture/acceptance.json
             ${{ runner.temp }}/open-fret-fixture/inference.json
             ${{ runner.temp }}/open-fret-fixture/output.tex

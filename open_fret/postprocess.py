@@ -4,6 +4,7 @@ Correction is explicit and separately reported: it is not a raw model metric.
 The interval assignment is bounded search, not a claim of general biomechanics.
 """
 from dataclasses import dataclass, field
+from collections import Counter
 from .events import midi_token_notes, tab_attacks, validate_fingerings
 
 DEFAULT_TUNING = [64, 59, 55, 50, 45, 40]
@@ -61,6 +62,18 @@ class NeighborSearchCorrector:
             raise ValueError("Invalid tuning/capo")
         source = list(source_notes) if source_notes is not None else midi_token_notes(midi, allow_open=True)
         source = sorted(source, key=lambda n: (n["start"], n["pitch"], str(n["id"])))
+        if source_notes is not None:
+            tick, attacks = 0, []
+            for token in midi:
+                if token.startswith('TS_'):
+                    delta = int(token[3:])
+                    if delta < 0:
+                        raise ValueError('Negative source time shift')
+                    tick += delta
+                elif token.startswith('NO_'):
+                    attacks.append((tick, int(token[3:])))
+            if Counter(attacks) != Counter((n['start'], n['pitch']) for n in source):
+                raise ValueError('Source note sidecar attacks differ from MIDI input')
         if len({n['id'] for n in source}) != len(source):
             raise ValueError("Duplicate source note identity")
         if any(n['start'] < 0 or n['end'] <= n['start'] for n in source):

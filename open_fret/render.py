@@ -302,6 +302,8 @@ class TabRenderer:
                     delta = int(t.split("_")[1])
                 except ValueError:
                     continue
+                if delta == 0:
+                    continue  # same onset, not an ASCII time advance
                 # Flush previous chord before counting gap after it.
                 if cur_chord:
                     flush_chord()

@@ -59,6 +59,10 @@ def test_absolute_onsets_identity_ends_and_carry_policy():
     assert [(n['start'], n['end']) for n in notes] == [(240, 2160), (480, 600), (960, 1200)]
     assert any(n['end'] == 2160 for w in windows[1:] for n in w.carry_notes)
     assert all(len(w.midi_tokens) + 1 <= 9 and len(w.tab_tokens) + 1 <= 9 for w in windows)
+    whole = SequenceBuilder().build_example(track, source='song')
+    assert whole.start_tick == 0
+    assert whole.midi_tokens[2] == 'TS_240'
+    assert len(whole.notes) == 3 and whole.notes[0]['end'] == 2160
 
 
 def test_oversized_single_onset_fails_instead_of_truncation():

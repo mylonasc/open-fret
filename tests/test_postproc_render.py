@@ -35,3 +35,12 @@ def test_ascii_aligned_width():
     assert len(lines) == 6
     widths = {len(line) for line in lines}
     assert len(widths) == 1, lines
+
+
+def test_zero_shift_stays_one_chord_and_custom_string_count_is_not_lost():
+    renderer = TabRenderer(tuning_str='E5 B4 G4 D4 A3 E3 B2')
+    assert renderer.to_ascii('TAB_1_0 TS_0 TAB_7_10') == renderer.to_ascii('TAB_1_0 TAB_7_10')
+    lines = renderer.to_ascii('TAB_1_0 TAB_7_10').splitlines()
+    assert len(lines) == 7
+    assert len({len(line) for line in lines}) == 1
+    assert '10' in lines[-1]

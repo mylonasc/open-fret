@@ -56,6 +56,8 @@ def test_impossible_sustain_and_search_cap_fail_without_partial_output():
     assert caught.value.report.corrected_notes == []
     with pytest.raises(CorrectionError, match='budget'):
         NeighborSearchCorrector(max_states=0).correct([], notes_to_tokens(source), source_notes=source)
+    with pytest.raises(ValueError, match='sidecar attacks differ'):
+        NeighborSearchCorrector().correct([], ['NO_59'], source_notes=source)
 
 
 def test_tuning_capo_range_and_release_before_attack():

@@ -13,6 +13,8 @@ def read_midi_notes(midi_path: str, target_resolution: int = 480, instrument=Non
     midi = mido.MidiFile(midi_path)
     if midi.type == 2:
         raise ValueError("Asynchronous type-2 MIDI is unsupported")
+    if midi.ticks_per_beat <= 0:
+        raise ValueError('SMPTE time division is unsupported; PPQ MIDI is required')
     scale = target_resolution / midi.ticks_per_beat
     groups = {}
     tempo_events = []
