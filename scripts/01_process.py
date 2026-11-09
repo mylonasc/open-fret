@@ -52,7 +52,7 @@ _UPSTREAM_PARSER = None
 
 def _process_one(args):
     global _UPSTREAM_PARSER
-    file_path, output_dir, extracted_root, seed, backend = args
+    file_path, output_dir, extracted_root, seed, backend, instrument_policy = args
     version = PARSER_VERSION
     if backend == "alphatab":
         from open_fret.alphatab_parser import AlphaTabParser
@@ -74,10 +74,21 @@ def _process_one(args):
         rel_path = os.path.relpath(file_path, extracted_root)
         rng = random.Random(f"{seed}:{rel_path}")
         out_count = 0
+        pending_outputs = []
+        from open_fret.domains import accept_instrument, instrument_domain
+        domain_counts = Counter()
+        rejected_tracks = 0
         for track_idx, track in enumerate(tracks):
             if not track.events:
                 continue
-            for capo in (0, rng.randint(1, 7)):
+            domain = instrument_domain(track.program, len(track.tuning))
+            domain_counts[domain] += 1
+            if not accept_instrument(track.program, len(track.tuning), instrument_policy):
+                rejected_tracks += 1
+                continue
+            # Split first; the separate training-only augmentation stage creates
+            # derivatives only for sources assigned to the training partition.
+            for capo in (0,):
                 steps, tuning = builder.build_steps(track, capo=capo)
                 if not steps:
                     continue
@@ -103,19 +114,31 @@ def _process_one(args):
                         "notes": w.notes,
                         "carry_notes": w.carry_notes,
                         "window_version": w.window_version,
+                        "program": track.program, "track_name": track.name,
+                        "voices": track.voices, "instrument_domain": domain,
+                        "source_articulations_not_targeted": getattr(parser, 'diagnostics', {}).get('articulations_not_targeted', {}),
                         "file": rel_path,
                         "parser_version": version,
                     }
-                    with open(os.path.join(output_dir, name), "w", encoding="utf-8") as f:
-                        json.dump(payload, f)
+                    pending_outputs.append((name, payload))
                     out_count += 1
-        return out_count, "", getattr(parser, "diagnostics", {})
+        # A rejected source contributes no partially processed tracks/windows.
+        # I/O failures are fatal to the stage, not misclassified as syntax rejects.
+        for name, payload in pending_outputs:
+            with open(os.path.join(output_dir, name), 'w', encoding='utf-8') as f:
+                json.dump(payload, f)
+        diagnostics = dict(getattr(parser, "diagnostics", {}))
+        diagnostics.update(domains=dict(domain_counts), rejected_tracks=rejected_tracks)
+        return out_count, "", diagnostics
+    except OSError:
+        raise
     except Exception as e:  # noqa: BLE001 - counted and reported
         return 0, f"{file_path}: {e}\n{traceback.format_exc()}", {}
 
 
 def main(extracted_dir="dataset/raw/extracted",
-         processed_dir="dataset/processed/individual", seed=42, workers=None, parser_backend="alphatab"):
+         processed_dir="dataset/processed/individual", seed=42, workers=None, parser_backend="alphatab",
+         instrument_policy='mixed'):
     if os.path.isdir(processed_dir) and os.listdir(processed_dir):
         raise FileExistsError("Use an empty output directory to avoid mixing stale windows")
     os.makedirs(processed_dir, exist_ok=True)
@@ -134,13 +157,17 @@ def main(extracted_dir="dataset/raw/extracted",
     success = 0
     failures: list[str] = []
     effects = Counter()
+    domains = Counter()
+    rejected_tracks = 0
     skipped_unpitched = skipped_staves = 0
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as ex:
-        jobs = [(f, processed_dir, extracted_dir, seed, parser_backend) for f in all_files]
+        jobs = [(f, processed_dir, extracted_dir, seed, parser_backend, instrument_policy) for f in all_files]
         for count, err, diagnostic in tqdm(ex.map(_process_one, jobs, chunksize=16), total=len(jobs),
                                desc="Processing files"):
             success += count
             effects.update(diagnostic.get("articulations_not_targeted", {}))
+            domains.update(diagnostic.get('domains', {}))
+            rejected_tracks += diagnostic.get('rejected_tracks', 0)
             skipped_unpitched += diagnostic.get("skipped_unpitched_notes", 0)
             skipped_staves += diagnostic.get("skipped_staves", 0)
             if err:
@@ -155,6 +182,9 @@ def main(extracted_dir="dataset/raw/extracted",
             f.write("\n".join(failures))
     with open(os.path.join(processed_dir, "_processing_manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"parser_version": ALPHATAB_PARSER_VERSION if parser_backend == "alphatab" else PARSER_VERSION,
+                   "status": "complete" if success else "failed", "instrument_policy": instrument_policy,
+                   "domains": dict(domains), "rejected_tracks": rejected_tracks,
+                   "augmentation": "none; apply only after splitting",
                    "seed": seed, "articulations_not_targeted": dict(effects),
                    "skipped_unpitched_notes": skipped_unpitched, "skipped_staves": skipped_staves,
                    "source_files": len(all_files), "rejected_files": len(failures),
@@ -171,6 +201,7 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--parser-backend", choices=["strict", "alphatab"], default="alphatab")
+    ap.add_argument('--instrument-policy', choices=['mixed', 'guitar'], default='mixed')
     a = ap.parse_args()
     main(extracted_dir=a.extracted_dir, processed_dir=a.processed_dir, seed=a.seed,
-         workers=a.workers, parser_backend=a.parser_backend)
+          workers=a.workers, parser_backend=a.parser_backend, instrument_policy=a.instrument_policy)

@@ -40,6 +40,7 @@ def fixture_cache(tmp_path_factory):
         name = f"song__c{capo}.json"
         (data / name).write_text(json.dumps({"midi": window.midi_tokens,
                                             "tab": window.tab_tokens,
+                                            "source": f"synthetic-{capo}.tex",
                                             "parser_version": PARSER_VERSION}))
         tokens.update(window.midi_tokens + window.tab_tokens)
         names.append(name)
@@ -57,7 +58,8 @@ def fixture_cache(tmp_path_factory):
 
 
 @pytest.mark.parametrize("flag,value", [(None, None), ("--pitch-loss-alpha", "0.3"),
-                                       ("--equivalence-smoothing", "0.1")])
+                                       ("--equivalence-smoothing", "0.1"),
+                                       ('--sampling-strategy', 'source')])
 def test_training_cli_from_fixture_cache(fixture_cache, flag, value):
     out = fixture_cache / (flag or "ce").removeprefix("--")
     command = [sys.executable, str(ROOT / "scripts/train_model.py"),
@@ -80,6 +82,19 @@ def test_training_cli_from_fixture_cache(fixture_cache, flag, value):
     assert manifest["loss"] == saved["open_fret_loss"]
     assert manifest["token_metadata"] == saved["open_fret_token_metadata"]
     assert (out / "final/tokenizer.json").exists()
+    if flag == '--sampling-strategy':
+        assert saved['open_fret_sampling_mode'] == 'source'
+        refused = subprocess.run(command[:], cwd=ROOT, env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''},
+                                 capture_output=True, text=True, timeout=90)
+        assert refused.returncode != 0  # existing fresh-run directory is protected
+        without_policy = [v for v in command[:-2]] + ['--resume', '--max-steps', '2']
+        refused = subprocess.run(without_policy, cwd=ROOT, env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''},
+                                 capture_output=True, text=True, timeout=90)
+        assert refused.returncode != 0 and 'sampling/source identity differs' in refused.stderr
+        resumed = subprocess.run(command + ['--resume', '--max-steps', '2'], cwd=ROOT,
+                                  env={**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '1'},
+                                  capture_output=True, text=True, timeout=90)
+        assert resumed.returncode == 0, resumed.stdout + resumed.stderr
 
 
 def test_cpu_fresh_resume_and_reload(fixture_cache):

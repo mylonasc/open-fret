@@ -98,6 +98,83 @@ Manifests include identities, fingerprints, group/source/track/window counts and
 excluded derivative counts. Existing checkpoints and frozen panels are untouched:
 new splits require separate retraining before any generalization comparison.
 
+Processing now emits unaugmented windows only. `scripts/05_augment_train.py`
+runs **after** the family split, creates deterministic source-level capo choices
+only for training, and copies primary validation/test unchanged. The versioned
+pipeline and CPU fixture both execute this ordering; validation/test derivatives
+are never generated in this stage. Model tokens remain backward compatible.
+
+Parser metadata includes original track name, program, string count and voice
+indices/counts. Source articulation projections are explicitly recorded rather
+than advertised as full performance-effect support. The default declared domain
+is `mixed`; use `--instrument-policy guitar` on processing/the full pipeline for
+programs 24–31 with 6–8 strings. Bass and unknown instruments are distinct domains,
+with rejection/projection counts in the processing manifest. This is a dataset
+policy applied before splitting, never a hidden validation filter. Voice indices
+are preserved; no inferred melodic/accompaniment role annotations are claimed.
+
+`train_model.py --sampling-strategy source` is an opt-in alternative to ordinary
+window sampling: every source has equal sampling mass, independent of its number
+of windows, with replacement and fixed epoch length. Sampling is epoch-seeded;
+resume verifies the sampling policy and row-ordered source identities. This
+requires new cache provenance and leaves ordinary training unchanged. Its
+comparison against window sampling is a **deferred research ablation**, not a
+claimed quality gain.
+
+## Evaluation and frozen validation panels
+
+```bash
+# Use a NEW v2 panel/report path; never replace historical audit evidence.
+python scripts/validate_generation.py --checkpoint /path/to/frozen/checkpoint \
+  --tokenizer /path/to/tokenizer --data-root /path/to/processed \
+  --sources 512 --decode-n 512 --manifest /path/to/new-panel-v2.json \
+  --out /path/to/new-validation-report.json
+# Diagnostic subsets may use --decode-n 32; their unattempted rows are explicit.
+python scripts/evaluate.py --model /path/to/frozen/local/artifact \
+  --dataset /path/to/strict-cache --split validation --report validation.json
+```
+
+The evaluator requires the requested validation/test split and row-ordered
+unmasked source provenance; it never substitutes training data or treats masked
+training labels as the original reference. Source hashes are checked. Old caches
+without provenance require a separate rebuild; no old artifacts are overwritten.
+Model/config/tokenizer/cache identities and deterministic decoder settings are
+recorded in machine-readable reports.
+
+Validation panel selection is model-independent: one uniform representative per
+source, coverage floors over observed style/tuning/capo/domain/length/reference-
+fret strata, then uniform remaining sources. There is no feasibility filtering.
+This balanced diagnostic panel is **not** an unbiased population-quality estimate.
+Arpeggio labels are explicitly overlapping-release/monophonic-attack proxies.
+The manifest freezes split identity, rows and content hashes before generation.
+Changed input/schema/selection parameters require a new manifest path.
+
+Reports distinguish unconstrained legacy output (no repetition ban), anchored
+output, corrected output and a no-learning minimum-fret/onset-duration baseline.
+One-to-one timed matching preserves multiplicity; missing/extra/shifted notes and
+truncated outputs reduce scores. Reports include timing error/tolerance in ticks
+and tempo-qualified seconds, edit distance, valid fingering/conflict counts,
+temporal coverage, EOS/cap stops and exact-reference diagnostics. Failed sources
+remain in zero-penalized macro-F1 denominators; success-only metrics are labeled
+separately. Source strata and heuristic family-cluster bootstrap intervals include
+support/attempt/failure counts. Carry-in windows cannot claim full sustained
+occupancy correction without complete-song context and report that limitation.
+
+Five previews remain qualitative. Anchored F1 measures input preservation, not
+learned fingering improvement. All checks in this engineering pass use synthetic
+validation data; the real held-out test has not been evaluated or used for tuning.
+
+### Parser acceptance evidence
+
+Strict and pinned AlphaTab fixtures cover the original `:4 0.1 0.2 0.6`
+regression, explicit/inherited/dotted durations, chords/rests, concert tuning,
+techniques, tuplets/ties and unsupported-syntax/tempo errors. The already-existing
+curated corpus manifest records 47,299 source files, 13,035 rejected files and
+1,054,200 windows from `alphatab-1.3.0-midi-duration-v1`; articulation projections
+are counted there. These are historical data-processing counts, not model
+quality scores. The current work preserves that evidence and does not rebuild
+the accepted training corpus in place.
+
 ## Scope decisions
 
 Research ablations (#14/#20 and sampling ablations in #21) are deferred per the
@@ -140,3 +217,9 @@ complete fixture also passed in that clean environment, including independent
 12-note/six-window AlphaTab import. Browser completeness/playback was checked on
 the separately generated fixture. These checks do not claim a remote CI run has
 finished; the committed workflow executes the same acceptance commands.
+
+The subsequent data-policy/evaluation batch passes **164 tests** in that same
+clean environment. The expanded fixture also passed post-split training-only
+augmentation (16 train / 1 validation / 1 test synthetic windows), resume/reload,
+six-window MIDI and exact independent AlphaTab import. No production HPO,
+retraining, held-out scoring or model release was performed.

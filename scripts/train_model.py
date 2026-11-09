@@ -296,6 +296,8 @@ def parse_args():
     p.add_argument("--workers", type=int, default=2,
                    help="DataLoader workers (dataloader_num_workers).")
     p.add_argument("--grad-accum", type=int, default=2)
+    p.add_argument('--sampling-strategy', choices=['window', 'source'], default='window',
+                    help='Opt-in equal source mass; requires row-ordered source provenance')
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save-steps", type=int, default=4000,
@@ -400,7 +402,7 @@ def train(args=None):
         if "train" not in dataset or "validation" not in dataset:
             raise ValueError(
                 f"Cache at {args.cache_dir} must contain 'train' and 'validation' splits, "
-                f"got {list(dataset.keys())}. Delete it and re-run 04_cache_dataset.py.")
+                f"got {list(dataset.keys())}. Rebuild into a new versioned cache directory.")
         train_dataset = dataset["train"]
         val_dataset = dataset["validation"]
     else:
@@ -500,7 +502,17 @@ def train(args=None):
                 args.decay_factor))
         optimizers = (optimizer, scheduler)
 
+    source_groups = None
+    if args.sampling_strategy == 'source':
+        provenance = os.path.join(args.cache_dir, 'train.sources.jsonl')
+        if not os.path.isfile(provenance):
+            raise ValueError('Source sampling requires strict-cache-v2 train.sources.jsonl; rebuild in a new cache')
+        with open(provenance, encoding='utf-8') as f:
+            source_groups = [json.loads(line).get('source') for line in f]
+        if not all(source_groups):
+            raise ValueError('Source sampling requires every source identity in cache provenance')
     trainer = TabLossTrainer(
+        source_groups=source_groups,
         loss_config=loss_config,
         loss_tokenizer=tokenizer,
         model=model,
@@ -564,6 +576,7 @@ def train(args=None):
             "epochs": args.epochs, "max_steps": args.max_steps,
             "batch_size": args.batch_size, "grad_accum": args.grad_accum,
             "effective_batch": args.batch_size * args.grad_accum,
+            "sampling_strategy": args.sampling_strategy,
             "lr": args.lr, "warmup_steps": args.warmup_steps,
             "decay_start_step": args.decay_start_step,
             "decay_factor": args.decay_factor,

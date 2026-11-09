@@ -44,15 +44,18 @@ def main(workspace):
                            track=w.track_index, window=w.window_index)
             (data / f'song{index}__c0.json').write_text(json.dumps(payload))
     load_script('03_split.py').split_dataset(str(data), str(root / 'splits'))
+    augmented = root / 'augmented'
+    load_script('05_augment_train.py').augment_train(data, root / 'splits', augmented)
+    data = augmented / 'individual'
     words = ([f'TAB_{s}_{f}' for s in range(1, 7) for f in range(25)] +
              [f'{kind}_{p}' for kind in ('NO', 'NF') for p in range(128)] +
-             ['CAPO_0', 'TUNING_64_59_55_50_45_40', 'TS_120', 'TS_240', 'TS_480'])
+             [f'CAPO_{c}' for c in range(8)] + ['TUNING_64_59_55_50_45_40', 'TS_120', 'TS_240', 'TS_480'])
     (root / 'vocab.json').write_text(json.dumps(words))
     load_script('02_tokenize.py').build_tokenizer(str(root / 'vocab.json'), str(root / 'tokenizer'))
     load_script('04_cache_dataset.py').create_cache(
         tokenizer_dir=str(root / 'tokenizer'), data_dir=str(data),
-        train_list=str(root / 'splits/train_files.txt'), val_list=str(root / 'splits/val_files.txt'),
-        test_list=str(root / 'splits/test_files.txt'), cache_dir=str(root / 'cache'), max_length=64, require_test=True)
+        train_list=str(augmented / 'train_files.txt'), val_list=str(augmented / 'val_files.txt'),
+        test_list=str(augmented / 'test_files.txt'), cache_dir=str(root / 'cache'), max_length=64, require_test=True)
     env = {**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
     command = [sys.executable, 'scripts/train_model.py', '--output-dir', str(root / 'run'),
                '--tokenizer-dir', str(root / 'tokenizer'), '--cache-dir', str(root / 'cache'),

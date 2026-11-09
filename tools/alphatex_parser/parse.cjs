@@ -11,7 +11,7 @@ function parse(content) {
       if (!/^[A-G][#b]?-?\d+$/.test(value)) throw Error('Unsupported tuning: ' + value);
       return value.replace(/(-?\d+)$/, octave => String(Number(octave) - 1));
     }).join(' '));
-  content = content.replace(/^\\track[^\r\n]*/gm, '\\track "Guitar"')
+  content = content.replace(/^\\track[ \t]*(?=\r?$)/gm, '\\track "Guitar"')
     .replace(/^\\frets[^\r\n]*(?:\r?\n|$)/gm, '');
   const settings = new at.Settings();
   settings.notation.notationMode = at.NotationMode.GuitarPro;
@@ -49,11 +49,14 @@ function parse(content) {
         const string = staff.tuning.length - note.string + 1;
         if (staff.tuning[string - 1] + note.fret !== note.realValue)
           throw Error('Pitch transposition/harmonic not representable by tuning + fret');
-        events.push({start, duration: ticks, notes: [{string, fret: note.fret, tech: null}]});
+        events.push({start, duration: ticks, voice: voice.index,
+                     notes: [{string, fret: note.fret, tech: null}]});
       }
     }
     events.sort((a, b) => a.start - b.start);
-    if (events.length) tracks.push({tuning: staff.tuning, tempo: score.tempo, events});
+    if (events.length) tracks.push({tuning: staff.tuning, tempo: score.tempo, events,
+      program: track.playbackInfo.program, name: track.name,
+      voices: Math.max(...staff.bars.map(b => b.voices.length))});
   }
   return {tracks, diagnostics};
 }

@@ -19,7 +19,11 @@ def event_stream(tokens, kind, tuning=None, capo=0):
             events.append({"tick": tick, "pitch": int(token[3:]), "string": None})
         elif kind == "tab" and token.startswith("TAB_"):
             parts = token.split("_")
-            string, fret = int(parts[1]), int(parts[2])
+            try:
+                string, fret = int(parts[1]), int(parts[2])
+            except (ValueError, IndexError):
+                events.append({'tick': tick, 'pitch': None, 'string': 0})
+                continue
             valid = 1 <= string <= len(tuning) and 0 <= fret <= 24 and tuning[string - 1] >= 0
             events.append({"tick": tick, "pitch": tuning[string - 1] + capo + fret if valid else None,
                            "string": string})
@@ -51,11 +55,16 @@ def structure(events):
             "same_string_conflict_onsets": sum(
                 len(g) > len({e["string"] for e in g}) for g in groups.values()
                 if g[0]["string"] is not None),
-            "invalid_notes": sum(e["pitch"] is None for e in events)}
+            "invalid_notes": sum(e["pitch"] is None for e in events),
+            "valid_string_fret_rate": sum(e["pitch"] is not None for e in events) / max(len(events), 1),
+            "duplicate_string_violations": sum(len(g) - len({e['string'] for e in g})
+                                               for g in groups.values() if g[0]['string'] is not None)}
 
 
 def timed_match(reference, predicted, tolerance=30):
     """Maximum-cardinality sorted matching per pitch, in ticks (480 PPQ)."""
+    if tolerance < 0:
+        raise ValueError('Onset tolerance must be nonnegative')
     ref_by_pitch, pred_by_pitch = defaultdict(list), defaultdict(list)
     for e in reference:
         ref_by_pitch[e["pitch"]].append(e["tick"])
@@ -97,7 +106,7 @@ def repetition_conflicts(tokens, n=3):
             "first_forbidden_token_1based": repeated[0] if repeated else None}
 
 
-def compare_streams(input_tokens, ref_tokens, pred_tokens):
+def compare_streams(input_tokens, ref_tokens, pred_tokens, tolerance=30):
     tuning, capo = conditioning(input_tokens)
     source, end = event_stream(input_tokens, "midi")
     reference, _ = event_stream(ref_tokens, "tab", tuning, capo)
@@ -112,7 +121,10 @@ def compare_streams(input_tokens, ref_tokens, pred_tokens):
             "input_reference_onsets_identical": same,
             "input_end_tick": end, "prediction_end_tick": pred_end,
             "note_count_ratio": len(predicted) / max(len(source), 1),
-            "timed_pitch": timed_match(source, predicted),
+            "timed_pitch": timed_match(source, predicted, tolerance),
+            "time_coverage_ratio": min(pred_end, end) / end if end else float(not predicted),
+            "missing_attacks": max(0, len(source) - timed_match(source, predicted, tolerance)['matched_notes']),
+            "extra_attacks": len(predicted) - timed_match(source, predicted, tolerance)['matched_notes'],
             "untimed_pitch_matched": pitch_overlap,
             "untimed_pitch_precision": pitch_overlap / max(len(predicted), 1),
             "untimed_pitch_recall": pitch_overlap / max(len(source), 1),

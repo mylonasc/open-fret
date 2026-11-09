@@ -60,7 +60,11 @@ class TabLossTrainer(Trainer):
     a different objective is still possible via --init-from into a new run.
     """
 
-    def __init__(self, *args, loss_config=None, loss_tokenizer=None, **kwargs):
+    def __init__(self, *args, loss_config=None, loss_tokenizer=None, source_groups=None, **kwargs):
+        import hashlib
+        self.source_groups = source_groups
+        self.sampling_mode = 'source' if source_groups is not None else 'window'
+        self.source_hash = hashlib.sha256(json.dumps(source_groups).encode()).hexdigest() if source_groups is not None else None
         self.tab_loss_config = loss_config or LossConfig()
         self.token_metadata = TokenMetadata.from_tokenizer(
             loss_tokenizer, self.tab_loss_config.max_fret)
@@ -73,6 +77,8 @@ class TabLossTrainer(Trainer):
                               if self.tab_loss_config.enabled else None)
         self.model.config.open_fret_loss = self.tab_loss_config.to_dict()
         self.model.config.open_fret_token_metadata = self.token_metadata.manifest()
+        self.model.config.open_fret_sampling_mode = self.sampling_mode
+        self.model.config.open_fret_source_hash = self.source_hash
         if self.tab_loss_config.enabled:
             # HF versions differ in gradient accumulation plumbing. This loss
             # is a mean per microbatch, NOT normalized over the accumulated batch.
@@ -82,6 +88,9 @@ class TabLossTrainer(Trainer):
     def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
         with open(os.path.join(resume_from_checkpoint, "config.json"), encoding="utf-8") as f:
             saved = json.load(f)
+        if (saved.get('open_fret_sampling_mode', 'window') != self.sampling_mode or
+                saved.get('open_fret_source_hash') != self.source_hash):
+            raise ValueError('Checkpoint sampling/source identity differs; use identical data/policy for resume')
         saved_loss = dict(saved.get("open_fret_loss", LossConfig().to_dict()))
         saved_loss.setdefault("ce_weight", 1.0)
         saved_loss.setdefault("type_alpha", 0.0)
@@ -93,6 +102,15 @@ class TabLossTrainer(Trainer):
         if self.tab_loss_config.enabled and saved.get("open_fret_token_metadata") != self.token_metadata.manifest():
             raise ValueError("Checkpoint tokenizer/pitch metadata differs from this run")
         return super()._load_from_checkpoint(resume_from_checkpoint, model=model)
+
+    def _get_train_sampler(self, train_dataset=None):
+        if self.source_groups is None:
+            return super()._get_train_sampler(train_dataset)
+        from .sampling import SourceBalancedSampler
+        dataset = self.train_dataset if train_dataset is None else train_dataset
+        if len(self.source_groups) != len(dataset):
+            raise ValueError('Source provenance length differs from training rows')
+        return SourceBalancedSampler(self.source_groups, seed=self.args.seed)
 
     def _set_signature_columns_if_needed(self):
         super()._set_signature_columns_if_needed()

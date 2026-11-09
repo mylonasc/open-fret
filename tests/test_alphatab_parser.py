@@ -59,3 +59,12 @@ def test_bad_syntax_rejected_without_poisoning_next_file(parser):
 def test_variable_tempo_is_explicitly_rejected(parser):
     with pytest.raises(ValueError, match="Variable tempo"):
         parser.parse_text(tex(":4 0.1 | \\tempo 90 :4 0.2"))
+
+
+def test_instrument_name_program_and_voice_metadata_are_preserved(parser):
+    content = tex(':4 0.1').replace('\\track\n', '\\track "Nylon lead"\n\\instrument 24\n')
+    track = parser.parse_text(content)[0]
+    assert track.program == 24
+    assert track.name == 'Nylon lead'
+    assert track.voices >= 1
+    assert track.events[0].voice == 0

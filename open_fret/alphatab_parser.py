@@ -32,8 +32,10 @@ class AlphaTabParser:
         if not result["ok"]:
             raise AlphaTexParseError(result["error"])
         self.diagnostics = result["diagnostics"]
-        return [ParsedTrack(tuning=t["tuning"], tempo=t["tempo"], events=[
+        return [ParsedTrack(tuning=t["tuning"], tempo=t["tempo"], program=t.get('program'),
+                            name=t.get('name', ''), voices=t.get('voices', 1), events=[
             TimedEvent(start=e["start"], duration=e["duration"],
+                       voice=e.get('voice', 0),
                        notes=[ParsedNote(**n) for n in e["notes"]]) for e in t["events"]])
                 for t in result["tracks"]]
 

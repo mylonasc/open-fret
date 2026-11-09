@@ -83,6 +83,7 @@ def create_cache(tokenizer_dir="dataset/processed/tab_tokenizer",
         for split in splits:
             os.rename(Path(workspace) / f'{split}.sources.jsonl', output / f'{split}.sources.jsonl')
         manifest = {"schema_version": "strict-cache-v2", "status": "complete",
+                    "data_dir": str(Path(data_dir).resolve()),
                     "tokenizer_dir": str(tokenizer_dir), "max_length": max_length,
                     "tokenizer_sha256": hashlib.sha256(json.dumps(tokenizer.get_vocab(), sort_keys=True).encode()).hexdigest(),
                     "source_sha256": split_hashes, "parser_version": parser_version,

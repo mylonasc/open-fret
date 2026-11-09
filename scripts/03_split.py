@@ -27,8 +27,11 @@ def split_dataset(input_dir, output_dir, train_ratio=.8, val_ratio=.1, seed=42):
         source = row.get('source') or row.get('file')
         if not source:
             raise ValueError(f"Missing source identity: {path}")
-        rows[path.name] = row
-        sources.setdefault(source, []).append(row)
+        # Keep only identities in memory, not an entire corpus of token arrays.
+        rows[path.name] = {'source': source, 'capo': row.get('capo', 0),
+                           'track': row.get('track', 0),
+                           'instrument_domain': row.get('instrument_domain', 'unknown')}
+        sources.setdefault(source, []).append(path.name)
         digest.update(path.name.encode() + b'\0' + content)
     parent = {s: s for s in sources}
     def find(s):
@@ -42,7 +45,7 @@ def split_dataset(input_dir, output_dir, train_ratio=.8, val_ratio=.1, seed=42):
     named, exact, fingerprints = {}, {}, {}
     for source in sorted(sources):
         family = canonical_family(source)
-        fingerprint = musical_fingerprint(sources[source])
+        fingerprint = musical_fingerprint([json.loads((root / name).read_text()) for name in sources[source]])
         fingerprints[source] = fingerprint
         for key, table in ((family, named), (fingerprint, exact)):
             if key in table:

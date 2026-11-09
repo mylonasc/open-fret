@@ -75,6 +75,7 @@ class TimedEvent:
     start: int
     duration: int
     notes: list[ParsedNote] = field(default_factory=list)
+    voice: int = 0
 
 
 @dataclass
@@ -82,6 +83,9 @@ class ParsedTrack:
     tuning: list[int]
     tempo: int
     events: list[TimedEvent] = field(default_factory=list)
+    program: int | None = None
+    name: str = ""
+    voices: int = 1
 
 
 def parse_tuning(tuning_str: str) -> list[int]:

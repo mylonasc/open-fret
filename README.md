@@ -41,32 +41,19 @@ preprocessing lives in `open_fret/` (`alphatex`, `sequences`, `splits`,
 `postprocess`, `render`, `training`); `scripts/` are thin CLI wrappers.
 
 ```bash
-# 0. Quick fixture check (no download, no GPU)
-python scripts/smoke_test.py
-python -m pytest tests/ -q
-
-# 1. Download the dataset (if applicable/accessible)
-python scripts/00_download.py
-
-# 2. Process AlphaTex into aligned MIDI/tab windows
 npm ci --prefix tools/alphatex_parser  # pinned extended AlphaTab parser
-python scripts/01_process.py
-
-# 3. Split by source song (no leakage across train/val/test)
-python scripts/03_split.py
-
-# 4. Generate the vocabulary (prefer training-only for final runs)
-python scripts/01.5_generate_vocab.py --train-list dataset/processed/train_files.txt
-
-# 5. Tokenize the sequences for the model
-python scripts/02_tokenize.py
-
-# 6. Cache aligned train/validation/test tensors
-python scripts/04_cache_dataset.py
+# Real CPU fixture: no corpus download, no production artifacts
+python scripts/run_pipeline.py --fixture --workspace /path/to/new-fixture
+python -m pytest tests/ -q
+# Full corpus: separate versioned workspace, no automatic training
+python scripts/run_pipeline.py --workspace dataset/processed/new-protocol-v2 --prepare-only
 ```
 
-> Vocab built on all windows leaks held-out tokens; use `--train-list` for
-> final runs.
+The pipeline splits song families/full-source fingerprints **before** deterministic
+training-only capo augmentation. Primary validation/test remain unaugmented.
+TAB vocabulary comes from training or predefined fretboard tokens; structural
+input tokens have a documented all-split policy. Existing data is never silently
+overwritten or treated as valid merely because its directory exists.
 
 ### 3. Training
 
@@ -141,7 +128,7 @@ Open-Fret strictly follows the base architecture defined in the research paper:
 - **Effective Batch Size**: 64 (via Gradient Accumulation)
 - **Learning Rate**: 5e-4 with **Cosine Decay**.
 - **Optimizer**: Adafactor (Paper standard).
-- **Augmentation**: Random Capo (0-7) and Tuning shifts across training samples.
+- **Augmentation**: Deterministic source-level capo derivatives, training only after splitting; no automatic tuning-shift augmentation.
 
 ---
 

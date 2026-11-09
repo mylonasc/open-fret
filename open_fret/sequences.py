@@ -23,6 +23,7 @@ class FlatNote:
     note_id: str = ""
     start: int = 0
     end: int = 0
+    voice: int = 0
 
 
 @dataclass
@@ -78,7 +79,8 @@ class SequenceBuilder:
                 step_on = by_time.setdefault(start, TimedStep(time=start))
                 step_on.ons.append(FlatNote(pitch=pitch, string=note.string,
                                             fret=note.fret, tech=note.tech,
-                                            note_id=str(identity), start=start, end=start + duration))
+                                            note_id=str(identity), start=start, end=start + duration,
+                                            voice=event.voice))
                 identity += 1
                 end = start + duration
                 step_off = by_time.setdefault(end, TimedStep(time=end))
@@ -158,7 +160,7 @@ class AlignedWindower:
         windows: list[SequenceExample] = []
         all_notes = [{"id": f"{source}:{track_index}:{n.note_id}", "start": n.start,
                       "end": n.end, "pitch": n.pitch, "string": n.string,
-                      "fret": n.fret, "tech": n.tech}
+                      "fret": n.fret, "tech": n.tech, "voice": n.voice}
                      for step in steps for n in step.ons]
         cur: list[TimedStep] = []
         cur_ons = 0
