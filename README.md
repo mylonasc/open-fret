@@ -19,6 +19,18 @@
 
 ---
 
+## 🌐 Live viewer demo
+
+[**Open the interactive example →**](https://mylonasc.github.io/open-fret/examples/player.html)
+
+A static GitHub Pages page renders a playable, seekable AlphaTab score next to a
+MIDI piano roll, with a predicted/actual fingering toggle. It uses a hand-authored
+synthetic fixture; no corpus audio, reference annotations, model weights, or
+server-side inference are published. Build and hosting details are in
+[docs/pages_demo.md](docs/pages_demo.md).
+
+---
+
 ## 🚀 Getting Started
 
 For the tested CPU setup, real end-to-end fixture and full-song inference
