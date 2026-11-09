@@ -1,4 +1,5 @@
 import sys
+import pytest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -51,4 +52,5 @@ def test_pretrained_init_resizes_and_aligns_ids(tmp_path):
 
 def test_resolve_resume_none_for_fresh(tmp_path):
     assert resolve_resume_checkpoint(str(tmp_path), None) is None
-    assert resolve_resume_checkpoint(str(tmp_path), True) is None
+    with pytest.raises(FileNotFoundError, match="No checkpoint"):
+        resolve_resume_checkpoint(str(tmp_path), True)

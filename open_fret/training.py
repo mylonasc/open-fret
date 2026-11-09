@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 
 
 def find_latest_checkpoint(output_dir: str) -> str | None:
@@ -27,14 +28,41 @@ def resolve_resume_checkpoint(output_dir: str, resume: str | bool | None) -> str
     """Resolve what to pass as ``resume_from_checkpoint``.
 
     - ``False``/``None`` -> start fresh (None).
-    - ``True`` -> latest checkpoint in output_dir, or None if none exists
-      (fresh start instead of crashing).
-    - str path -> that path (validated by caller/Trainer).
+    - ``True`` -> latest checkpoint in output_dir; fail if absent/incomplete.
+    - str path -> validate a complete training checkpoint before returning it.
+
+    A weights-only artifact is initialization, not a safe optimizer resume.
     """
     if resume is True:
-        return find_latest_checkpoint(output_dir)
+        resume = find_latest_checkpoint(output_dir)
+        if resume is None:
+            raise FileNotFoundError(
+                f"No checkpoint found in {output_dir}. Omit --resume for fresh "
+                "training or pass --resume PATH to a complete checkpoint.")
     if resume in (False, None):
         return None
+    if not os.path.isdir(resume):
+        raise FileNotFoundError(f"Resume checkpoint directory not found: {resume}")
+    required = ("config.json", "trainer_state.json", "optimizer.pt", "scheduler.pt")
+    missing = [name for name in required if not os.path.isfile(os.path.join(resume, name))]
+    weights = ("model.safetensors", "pytorch_model.bin", "model.safetensors.index.json",
+               "pytorch_model.bin.index.json")
+    if not any(os.path.isfile(os.path.join(resume, name)) for name in weights):
+        missing.append("model weights")
+    if not any((name == "rng_state.pth" or name.startswith("rng_state_"))
+               and os.path.isfile(os.path.join(resume, name))
+               for name in os.listdir(resume)):
+        missing.append("rng_state.pth")
+    if missing:
+        raise ValueError(f"Incomplete resume checkpoint {resume}: missing {', '.join(missing)}. "
+                         "Use --init-from for weights-only initialization into a new run.")
+    try:
+        with open(os.path.join(resume, "trainer_state.json"), encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state.get("global_step"), int) or state["global_step"] < 0:
+            raise ValueError("invalid global_step")
+    except (ValueError, AttributeError) as e:
+        raise ValueError(f"Invalid trainer_state.json in {resume}: {e}") from e
     return resume
 
 

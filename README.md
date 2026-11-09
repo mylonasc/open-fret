@@ -1,19 +1,19 @@
 # 🎸 Open-Fret: MIDI to Guitar Tablature Transformer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12 tested](https://img.shields.io/badge/python-3.12%20tested-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Transformers](https://img.shields.io/badge/%F0%9F%A4%97-Transformers-orange)](https://huggingface.co/docs/transformers/index)
 
-**Open-Fret** is a high-performance, research-driven MIDI to Guitar Tablature transcription engine. Based on the **Fretting-Transformer** architecture, it leverages a custom-tailored T5 Transformer model to translate symbolic music (MIDI) into ergonomic, playable, and accurate guitar tabs.
+**Open-Fret** is a research MIDI-to-guitar-tablature pipeline using a small T5 model inspired by the **Fretting-Transformer** architecture. The current trained model is a development baseline, not a published benchmark or downloadable model release. See the [acceptance and issue ledger](docs/issue_triage.md) for verified scope and remaining work.
 
 ---
 
 ## ✨ Key Features
 
-- **🎯 High Accuracy**: Translates MIDI notes into precise string and fret combinations.
-- **⚡ CPU Optimized**: Specifically designed `T5-Tiny-Tab` architecture for fast inference on standard hardware.
-- **🎸 Ergonomics First**: Learns playable fingerings from massive datasets of real GuitarPro files.
+- **🎯 Anchored decoding**: Preserves supported input attacks and onset timing while selecting pitch-equivalent fingerings; unsupported/unassignable inputs fail explicitly.
+- **⚡ Small T5 model**: Supports CPU and CUDA execution; throughput depends on input and hardware.
+- **🎸 Fingering constraints**: Enforces distinct strings within each onset. Sustained-string occupancy and general human playability are not guaranteed.
 - **🔧 Multi-Config**: Support for custom tunings and capo positions (work in progress).
 - **📦 End-to-End Pipeline**: Complete scripts for data downloading, processing, vocabulary generation, and training.
 
@@ -26,7 +26,7 @@
 Clone the repository and install the dependencies:
 
 ```bash
-git clone https://github.com/your-username/open-fret.git
+git clone https://github.com/mylonasc/open-fret.git
 cd open-fret
 pip install -r requirements.txt
 ```
@@ -39,8 +39,8 @@ preprocessing lives in `open_fret/` (`alphatex`, `sequences`, `splits`,
 
 ```bash
 # 0. Quick fixture check (no download, no GPU)
-/tmp/opencode/venv/bin/python scripts/smoke_test.py
-/tmp/opencode/venv/bin/python -m pytest tests/ -q
+python scripts/smoke_test.py
+python -m pytest tests/ -q
 
 # 1. Download the dataset (if applicable/accessible)
 python scripts/00_download.py
@@ -80,15 +80,20 @@ python scripts/train_model.py --resume
 python scripts/train_model.py --resume models/tiny-tab-v1/checkpoint-XXXX
 ```
 
-*Note: Optimized to train on GPUs with as little as 8GB VRAM using the Adafactor optimizer.*
+Training auto-selects CUDA/fp16 when available, otherwise CPU/full precision.
+Memory needs depend on configuration; no fixed VRAM budget is guaranteed.
+Resume requires model, trainer, optimizer, scheduler and RNG checkpoint files;
+an absent/incomplete checkpoint fails instead of silently starting fresh.
+Use `--init-from` separately for weights-only initialization into a new run.
 
 ### 4. Inference
 
 Convert your MIDI files to tokens, and then to tablature:
 
 ```bash
-python scripts/inference.py --midi path/to/your/song.mid
-# Optional: --out predictions.tokens --stochastic for sampling
+python scripts/inference.py --midi path/to/your/song.mid --model path/to/local/run/final
+# Optional: --out predictions.tokens
+# Sampling is legacy-only: --decoding-mode legacy --stochastic
 ```
 
 ### 5. Hyperparameter tuning (Optuna)
@@ -145,8 +150,8 @@ The project utilizes the following data sources for training and evaluation:
 ---
 
 ## 🗺️ Roadmap
-- [x] **Neighbor Search Implementation**: 100% pitch matching between MIDI and Tab (Section 3.5).
-- [x] **Technique Layer**: Full support for Bends, Slides, and Vibrato in the token stream.
+- [x] **Anchored attack decoding**: Pitch-legal choices with distinct strings per onset; sustained occupancy remains open.
+- [ ] **Complete technique fidelity**: Parser/token support does not imply all effects survive generation and playback.
 - [ ] **Audio-to-Tab API**: Full end-to-end transcription from MP3/WAV.
 - [ ] **ONNX Quantization**: Faster CPU inference for web deployment.
 

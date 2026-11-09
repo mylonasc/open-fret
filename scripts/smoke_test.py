@@ -108,7 +108,12 @@ def main():
         print("Postprocess + render OK")
 
         # 5. Training-loop argument/resume wiring (no GPU needed).
-        assert resolve_resume_checkpoint(tmp, True) is None
+        try:
+            resolve_resume_checkpoint(tmp, True)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("Missing resume checkpoint must fail visibly")
         assert resolve_resume_checkpoint(tmp, None) is None
         print("Training resume wiring OK (fresh start defaults to None)")
 

@@ -113,3 +113,16 @@ def test_chunking_never_divides_same_tick_chord():
     assert chunks[1] == 'TS_120 NF_64 NF_66 NO_64 NO_66'.split()
     with pytest.raises(UnsupportedInputError):
         chunk_complete_onsets(tokens, 4)
+
+
+def test_deterministic_repeated_monophonic_attacks_and_eos(setup):
+    tok, model = setup
+    tokens = PREFIX + 'NO_64 TS_120 NF_64 TS_120'.split() * 5
+    first = generate_tab(model, tok, tokens)
+    second = generate_tab(model, tok, tokens)
+    assert first.tokens == second.tokens
+    assert first.stopped_eos and second.stopped_eos
+    assert sum(t.startswith('TAB_') for t in first.tokens) == 5
+    assert [t for t in first.tokens if t.startswith('TS_')] == ['TS_120'] * 10
+    with pytest.raises(UnplayableInputError, match="No vocabulary fingering"):
+        AnchoredTemplate(tok, PREFIX + ['NO_127'])

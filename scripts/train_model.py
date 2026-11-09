@@ -357,7 +357,11 @@ def train(args=None):
     if os.path.exists(output_dir) and os.listdir(output_dir) and not args.resume:
         raise FileExistsError(
             f"Output dir {output_dir} is not empty. Pass --resume to continue it "
-            "or choose another --run-name.")
+             "or choose another --run-name.")
+    if args.resume and args.init_from:
+        raise ValueError("--resume and --init-from are mutually exclusive")
+    # Validate before creating logs, trials, models, or overwriting run metadata.
+    resume_checkpoint = resolve_resume_checkpoint(output_dir, args.resume)
     os.makedirs(output_dir, exist_ok=True)
     args.output_dir = output_dir
     args.log_file = args.log_file or os.path.join(output_dir, "train.log")
@@ -496,7 +500,6 @@ def train(args=None):
         callbacks=callbacks,
     )
 
-    resume_checkpoint = resolve_resume_checkpoint(args.output_dir, args.resume)
     if resume_checkpoint:
         print(f"Resuming training from checkpoint: {resume_checkpoint}")
         mode = "RESUMING"
