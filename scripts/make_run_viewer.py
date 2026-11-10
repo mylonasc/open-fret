@@ -69,14 +69,22 @@ def build_run_viewer(run_dir, step=None, step_dir=None, out_name="viewer.html"):
             with open(ref_path, encoding="utf-8") as f:
                 ref_tokens = f.read().split() or None
         title = f"{song['name']} — predicted vs actual @ {step}"
-        bundle = build_view_bundle(midi_tokens=midi_tokens,
-                                   tab_tokens=pred_tokens,
-                                   reference_tab_tokens=ref_tokens,
-                                   title=title, tempo=song.get("tempo", 120))
-        sections.append(f"<h2>{html_utils.escape(title)}</h2>\n"
-                        f"<p>pred {len(pred_tokens)} tokens, "
-                        f"ref {song.get('n_ref')} tokens</p>\n"
-                        + to_html(bundle, with_deps=False))
+        try:
+            bundle = build_view_bundle(midi_tokens=midi_tokens,
+                                       tab_tokens=pred_tokens,
+                                       reference_tab_tokens=ref_tokens,
+                                       title=title, tempo=song.get("tempo", 120))
+            sections.append(f"<h2>{html_utils.escape(title)}</h2>\n"
+                            f"<p>pred {len(pred_tokens)} tokens, "
+                            f"ref {song.get('n_ref')} tokens</p>\n"
+                            + to_html(bundle, with_deps=False))
+        except Exception as e:  # noqa: BLE001 - one bad song (e.g. an
+            # unrenderable same-onset conflict in pred or ref) must never
+            # fail the viewer, let alone kill a training run.
+            sections.append(f"<p>⚠️ {html_utils.escape(song['name'])}: viewer skipped "
+                            f"({html_utils.escape(type(e).__name__)}: "
+                            f"{html_utils.escape(str(e)[:200])})</p>")
+            continue
         n_ok += 1
 
     loss_str = f"{eval_loss:.4f}" if eval_loss is not None else "n/a"
