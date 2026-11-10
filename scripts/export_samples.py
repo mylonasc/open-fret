@@ -79,6 +79,68 @@ def write_song(out_dir, renderer, name, midi_tokens, ref_tokens, pred_tokens,
     return base
 
 
+def export_from_model(tok, model, songs, out_dir, *, title_prefix="",
+                      beams=4, decoding_mode="anchored", no_repeat_ngram=0,
+                      repetition_penalty=1.0, build_viewer=True):
+    """Decode fixed songs with a trained model and write playable artifacts.
+
+    Writes ``<song>.{pred,ref,input}.txt``, ``<song>.pred.{tex,ascii}`` and
+    ``manifest.json`` (plus ``viewer.html`` when ``build_viewer`` and the
+    repo dist bundle is available), so any run — full training or a single
+    HPO trial — leaves generated examples connected to its config. Returns
+    the manifest dict. Never raises for viewer failures.
+    """
+    from open_fret.viewer import build_view_bundle, renderer_for_input, to_html
+    os.makedirs(out_dir, exist_ok=True)
+    manifest = {"songs": [], "decoding": {"beams": beams, "mode": decoding_mode,
+                "no_repeat_ngram": no_repeat_ngram,
+                "repetition_penalty": repetition_penalty}}
+    sections = []
+    dist_js = None
+    if build_viewer:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(root, "ui", "tab_data_viewer", "dist",
+                                   "tab-data-viewer.umd.js"), encoding="utf-8") as f:
+                dist_js = f.read()
+        except OSError:
+            dist_js = None
+    for s in songs:
+        pred, stopped = decode(tok, model, s["midi_tokens"],
+                               beams=beams, no_repeat_ngram=no_repeat_ngram,
+                               repetition_penalty=repetition_penalty,
+                               mode=decoding_mode)
+        renderer = renderer_for_input(s["midi_tokens"], s.get("tempo", 120))
+        base = write_song(out_dir, renderer, s["name"],
+                          s["midi_tokens"], s["tab_tokens"], pred)
+        manifest["songs"].append(
+            {"name": s["name"], "file": base, "n_pred": len(pred),
+             "n_ref": len(s["tab_tokens"]), "stopped_eos": stopped,
+             "tempo": s.get("tempo", 120), "loop": is_loop(pred)})
+        if dist_js is not None:
+            try:
+                bundle = build_view_bundle(
+                    midi_tokens=s["midi_tokens"], tab_tokens=pred,
+                    reference_tab_tokens=s["tab_tokens"],
+                    title=f"{title_prefix}{s['name']}" if title_prefix else s["name"],
+                    tempo=s.get("tempo", 120))
+                sections.append(f"<h2>{base}</h2>\n"
+                                + to_html(bundle, dist_js, with_deps=not sections))
+            except Exception as e:  # noqa: BLE001 - viewer never blocks export
+                print(f"viewer build failed for {s['name']}: {e}")
+    if dist_js is not None and sections:
+        deps_note = ("<p>Playable predictions: MIDI input (left) vs tab (right). "
+                     "First section carries the viewer scripts.</p>\n")
+        with open(os.path.join(out_dir, "viewer.html"), "w", encoding="utf-8") as f:
+            f.write('<!doctype html><html><head><meta charset="utf-8">'
+                    '<title>Sample viewer</title></head><body>\n'
+                    + deps_note + "\n<hr>\n".join(sections) + "\n</body></html>\n")
+        manifest["viewer"] = "viewer.html"
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
@@ -103,7 +165,6 @@ def main():
         p.error("Neighbor search would invalidate anchored guarantees; use legacy comparison mode")
 
     tok, model = load_model(args.checkpoint)
-    renderer = TabRenderer()
     correct = None
     if args.neighbor_search:
         from open_fret.postprocess import neighbor_search as correct
@@ -111,32 +172,36 @@ def main():
 
     songs = select_sample_songs(args.val_files, args.data_dir,
                                 k=args.sample_songs)
-    manifest = {"checkpoint": args.checkpoint,
-                 "decoding": {"beams": args.beams, "mode": args.decoding_mode,
-                              "no_repeat_ngram": args.no_repeat_ngram if args.decoding_mode == "legacy" else 0,
-                             "repetition_penalty": args.repetition_penalty,
-                             "neighbor_search": bool(correct)},
-                "songs": []}
-    for s in songs:
-        pred, stopped = decode(tok, model, s["midi_tokens"],
-                               beams=args.beams,
-                               no_repeat_ngram=args.no_repeat_ngram,
-                                repetition_penalty=args.repetition_penalty, mode=args.decoding_mode)
-        if correct is not None:
+    manifest = export_from_model(
+        tok, model, songs, args.out_dir,
+        beams=args.beams, decoding_mode=args.decoding_mode,
+        no_repeat_ngram=args.no_repeat_ngram if args.decoding_mode == "legacy" else 0,
+        repetition_penalty=args.repetition_penalty)
+    manifest["checkpoint"] = args.checkpoint
+    manifest["decoding"]["neighbor_search"] = bool(correct)
+    if correct is not None:
+        # Legacy comparison mode only: snap + rewrite predictions in place.
+        for entry in manifest["songs"]:
+            base = entry["file"]
+            with open(os.path.join(args.out_dir, base + ".pred.txt"),
+                      encoding="utf-8") as f:
+                pred = f.read().split()
+            with open(os.path.join(args.out_dir, base + ".input.txt"),
+                      encoding="utf-8") as f:
+                midi = f.read().split()
             try:
-                pred = correct(pred, s["midi_tokens"])
+                fixed = correct(pred, midi)
             except Exception as e:  # noqa: BLE001
-                print(f"neighbor_search failed for {s['name']}: {e}")
-        from open_fret.viewer import renderer_for_input
-        renderer = renderer_for_input(s["midi_tokens"], s.get("tempo", 120))
-        base = write_song(args.out_dir, renderer, s["name"],
-                          s["midi_tokens"], s["tab_tokens"], pred)
-        manifest["songs"].append(
-            {"name": s["name"], "file": base, "n_pred": len(pred),
-              "n_ref": len(s["tab_tokens"]), "stopped_eos": stopped, "tempo": s.get("tempo", 120),
-             "loop": is_loop(pred)})
-        print(f"{s['name'][:50]:50s} n_pred={len(pred):4d} "
-              f"eos={stopped!s:5s} loop={is_loop(pred)!s:5s}")
+                print(f"neighbor_search failed for {entry['name']}: {e}")
+                continue
+            with open(os.path.join(args.out_dir, base + ".pred.txt"),
+                      "w", encoding="utf-8") as f:
+                f.write(" ".join(fixed))
+    with open(os.path.join(args.out_dir, "manifest.json"),
+              "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    for entry in manifest["songs"]:
+        print(f"{entry['name'][:50]:50s} n_pred={entry['n_pred']:4d}")
 
     if args.probe_n > 0:
         from datasets import load_from_disk

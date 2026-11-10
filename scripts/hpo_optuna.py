@@ -74,6 +74,17 @@ def parse_args():
     p.add_argument("--init-from", default=None,
                    help="Optional pretrained T5 endpoint to fine-tune per trial "
                         "instead of training from scratch.")
+    p.add_argument("--sample-songs", type=int, default=5,
+                   help="Fixed validation windows exported per completed trial "
+                   "(0 disables trial sample export).")
+    p.add_argument("--sample-data-dir", default=None,
+                   help="Individual-window dir for trial samples "
+                   "(required for export; skipped with notice if absent).")
+    p.add_argument("--sample-val-files", default=None,
+                   help="val_files.txt listing the sample panel source windows.")
+    p.add_argument("--sample-beams", type=int, default=2,
+                   help="Anchored beams for trial sample decoding (2 keeps "
+                        "multi-trial studies fast; training eval uses 4).")
     return p.parse_args()
 
 
@@ -342,6 +353,43 @@ def objective(trial, args):
     val_loss = float(metrics.get("eval_loss", float("inf")))
     trainer.save_model(os.path.join(out_dir, 'final'))
     tokenizer.save_pretrained(os.path.join(out_dir, 'final'))
+    # Fixed-panel generated examples stay connected to the trial so weight
+    # choices can be judged later by listening, not just by eval_loss.
+    try:
+        from export_samples import export_from_model
+        from train_model import select_sample_songs
+        sample_songs = []
+        if args.sample_songs > 0 and args.sample_data_dir and args.sample_val_files:
+            sample_songs = select_sample_songs(
+                args.sample_val_files, args.sample_data_dir,
+                k=args.sample_songs, tokenizer=tokenizer)
+        if sample_songs:
+            sample_manifest = export_from_model(
+                tokenizer, model, sample_songs,
+                os.path.join(out_dir, "samples"),
+                title_prefix=f"trial {trial.number} — ",
+                beams=args.sample_beams, decoding_mode="anchored")
+            sample_manifest["trial"] = trial.number
+            sample_manifest["loss"] = loss_config.to_dict()
+            sample_manifest["val_loss"] = val_loss
+            with open(os.path.join(out_dir, "samples", "manifest.json"),
+                      "w", encoding="utf-8") as f:
+                json.dump(sample_manifest, f, indent=2)
+            trial.set_user_attr("sample_export", {
+                "songs": len(sample_manifest["songs"]),
+                "viewer": f"trial_{trial.number}/samples/viewer.html"
+                if "viewer" in sample_manifest else None,
+                "val_loss": val_loss})
+        else:
+            print("trial sample export skipped (need --sample-data-dir, "
+                  "--sample-val-files and --sample-songs > 0)")
+            trial.set_user_attr("sample_export", {"songs": 0, "viewer": None,
+                                                  "val_loss": val_loss})
+    except Exception as e:  # noqa: BLE001 - examples must never fail a trial
+        print(f"trial sample export failed (non-fatal): {e}")
+        trial.set_user_attr("sample_export", {"songs": 0, "viewer": None,
+                                              "error": f"{type(e).__name__}: {e}",
+                                              "val_loss": val_loss})
 
     history = {"trial": trial.number, "params": params,
                "loss": loss_config.to_dict(),
