@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pretty_midi==0.2.11.post0
+numpy==2.5.4
+# open_fret is imported for viewer bundle building, which pulls the training
+# stack through open_fret/__init__.py. Mirror the repo pins for compatibility.
+torch==2.15.0
+transformers==5.22.2
+# tests / local dev
+httpx
+pytest

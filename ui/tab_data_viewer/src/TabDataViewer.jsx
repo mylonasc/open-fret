@@ -408,6 +408,16 @@ export function TabDataViewer({ bundle }) {
       host.removeEventListener("click", onClick);
       if (resizeObserver) resizeObserver.disconnect();
       try {
+        // WaveRoll 0.4.0's destroy() does not cancel its throttled render
+        // frame; a queued frame firing post-destroy throws on nulled fields.
+        // Cancel it first (internal handle, guarded: harmless if renamed).
+        const inst = roll && roll._instance;
+        if (inst && inst.rafId != null && typeof cancelAnimationFrame === "function") {
+          cancelAnimationFrame(inst.rafId);
+          inst.rafId = null;
+        }
+      } catch (_) {}
+      try {
         roll && roll.destroy && roll.destroy();
       } catch (_) {}
       rollRef.current = null;

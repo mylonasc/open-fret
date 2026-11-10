@@ -18,9 +18,17 @@ node_modules/
 !tools/alphatex_parser/package-lock.json
 !website/package.json
 !website/package-lock.json
+!helper_apps/pair_judge/requirements.txt
+!helper_apps/pair_judge/web/package.json
+!helper_apps/pair_judge/web/package-lock.json
 !ui/tab_data_viewer/vendor/Bravura-OFL.txt
 website/build/
 website/.docusaurus/
 # Generated at Pages-deploy time by scripts/build_pages_demo.py (CI);
 # never commit: reproducible synthetic fixture, not source.
 website/static/examples/synthetic/
+
+# Helper apps (own deps; built artifacts stay out of git).
+helper_apps/pair_judge/web/dist/
+helper_apps/pair_judge/.venv/
+helper_apps/pair_judge/pair_judge.db

@@ -113,11 +113,20 @@ python scripts/hpo_optuna.py --trials 20 --storage sqlite:///hpo.db
 # Best config -> models/hpo/best_config.json; retrain via scripts/train_model.py
 ```
 
+For playability weights there is a ready-made grid
+(`scripts/run_playability_hpo.sh`, one study per weight combination).
+Every completed trial exports the fixed 5-window panel with a playable
+viewer — judge the combinations by ear in
+[`helper_apps/pair_judge`](helper_apps/README.md) (blind A/B, Elo, JSONL
+export for preference training) instead of comparing scalar losses.
+
 ### 6. Experimental pitch-aware losses
 
 Training and Optuna support separate opt-in `--pitch-loss-alpha 0.3`,
-`--equivalence-smoothing 0.1`, `--event-type-alpha 0.3` and
-`--conditional-pitch` experiments; ordinary CE remains the default.
+`--equivalence-smoothing 0.1`, `--event-type-alpha 0.3`,
+`--conditional-pitch`, `--position-alpha`, `--span-alpha` (+ `--span-margin`),
+and `--stretch-alpha` (+ `--stretch-margin`) experiments; ordinary CE remains
+the default.
 **Rebuild processed data/cache first:** inline AlphaTex durations previously
 failed to carry forward, and unsupported syntax was silently skipped. New loss
 experiments reject obsolete/unversioned caches. Rebuild the vocabulary with
