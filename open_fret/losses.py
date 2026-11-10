@@ -311,48 +311,113 @@ class TabLoss(nn.Module):
                 # Expected hand-span hinge per onset group: max-min expected
                 # fret over fretted target strings (midi-to-tab stretch and
                 # Noise2Fret hand-span share this per-onset quantity).
-                span_vals = []
-                for row in batch.unique():
-                    sel = batch.eq(row)
-                    for tick in note_ticks[sel].unique():
-                        gsel = sel & note_ticks.eq(tick)
-                        gidx = gsel.nonzero().squeeze(-1)
-                        strings = target_string[gidx]
-                        keep = target_fret[gidx].gt(0) & have_expected[gidx, strings]
-                        if keep.sum() < 2:
-                            continue
-                        kept = gidx[keep]
-                        vals = expected[kept, strings[keep]]
-                        span_vals.append(vals.max() - vals.min())
-                if span_vals:
-                    span_stack = torch.stack(span_vals)
-                    span_mean = torch.relu(span_stack - self.config.span_margin).mean()
-                    span_group_count = torch.tensor(len(span_vals), device=logits.device)
+                # Vectorized: one stable sort by (row, tick), then per-group
+                # max/min via scatter-reduce — no per-group Python loop, no
+                # .unique()/.nonzero() host syncs inside the loop.
+                n_notes = len(batch)
+                tick_big = torch.tensor(1 << 32, device=logits.device)
+                order = torch.argsort(batch.to(torch.int64) * tick_big
+                                      + note_ticks.to(torch.int64), stable=True)
+                srow = batch[order]
+                stick = note_ticks[order]
+                sstrings = target_string[order]
+                sval = expected[order, sstrings]
+                skeep = target_fret[order].gt(0) & have_expected[order, sstrings]
+                new_group = torch.ones(n_notes, dtype=torch.bool,
+                                       device=logits.device)
+                new_group[1:] = (srow[1:] != srow[:-1]) | (stick[1:] != stick[:-1])
+                group = torch.cumsum(new_group.to(torch.int64), dim=0) - 1
+                n_groups = int(group[-1].item()) + 1
+                neg = torch.full((), -float("inf"), device=logits.device,
+                                 dtype=sval.dtype)
+                pos = torch.full((), float("inf"), device=logits.device,
+                                 dtype=sval.dtype)
+                gmax = torch.full((n_groups,), -float("inf"),
+                                  device=logits.device, dtype=sval.dtype)
+                gmin = torch.full((n_groups,), float("inf"),
+                                  device=logits.device, dtype=sval.dtype)
+                gmax.scatter_reduce_(0, group,
+                                     torch.where(skeep, sval, neg),
+                                     reduce="amax", include_self=False)
+                gmin.scatter_reduce_(0, group,
+                                     torch.where(skeep, sval, pos),
+                                     reduce="amin", include_self=False)
+                gcount = torch.zeros(n_groups, dtype=torch.int64,
+                                     device=logits.device)
+                gcount.index_add_(0, group[skeep],
+                                  torch.ones_like(group[skeep]))
+                gvalid = gcount.ge(2)
+                # Masked mean (no host sync): invalid groups contribute 0 and
+                # are excluded from the denominator; empty groups give
+                # (-inf) - (+inf) = -inf -> relu -> 0 anyway, and `where`
+                # keeps them out of the sum regardless.
+                span_all = torch.where(
+                    gvalid, torch.relu(gmax - gmin - self.config.span_margin),
+                    torch.zeros((), device=logits.device, dtype=sval.dtype))
+                span_mean = span_all.sum() / gvalid.sum().clamp_min(1).to(
+                    span_all.dtype)
+                span_group_count = gvalid.sum().to(logits.device)
             if self.config.stretch_alpha:
                 # midi-to-tab neighbourhood deviation: per-note expected fret
                 # vs the ±5-note local mean (their MAX_DEVIATION run of 11),
                 # hinged at the margin. Only fretted targets participate.
-                stretch_vals = []
-                for row in range(labels.shape[0]):
-                    idx = (batch == row).nonzero().squeeze(-1)
-                    if idx.numel() < 2:
-                        continue
-                    order = torch.argsort(time[idx], stable=True)
-                    idx = idx[order]
-                    exp_f = expected[idx, target_string[idx]]
-                    tgt_f = target_fret[idx]
-                    for k in range(idx.numel()):
-                        if tgt_f[k] <= 0:
-                            continue
-                        lo, hi = max(0, k - 5), min(idx.numel(), k + 6)
-                        window = tgt_f[lo:hi]
-                        window = window[window.gt(0)]
-                        if window.numel() == 0:
-                            continue
-                        stretch_vals.append((exp_f[k] - window.float().mean()).abs())
-                if stretch_vals:
-                    stretch_stack = torch.stack(stretch_vals)
-                    stretch_mean = torch.relu(stretch_stack - self.config.stretch_margin).mean()
+                # Vectorized: one stable sort by (row, time), rows padded to
+                # the max row length, window sums via prefix sums — a single
+                # sync for the pad width, no per-note Python loop.
+                n_notes = len(batch)
+                t_big = labels.shape[1]
+                sorder = torch.argsort(batch.to(torch.int64) * t_big
+                                       + time.to(torch.int64), stable=True)
+                srow = batch[sorder]
+                sval_f = expected[sorder, target_string[sorder]]
+                stgt_f = target_fret[sorder]
+                svalid = stgt_f.gt(0)
+                row_counts = torch.zeros(labels.shape[0], dtype=torch.int64,
+                                         device=logits.device)
+                row_counts.index_add_(
+                    0, srow, torch.ones(n_notes, dtype=torch.int64,
+                                        device=logits.device))
+                max_m = int(row_counts.max().item())
+                pos_in_row = torch.arange(n_notes, device=logits.device)
+                pos_in_row = pos_in_row - (torch.cumsum(row_counts, dim=0) - row_counts)[srow]
+                exp_mat = torch.zeros((labels.shape[0], max_m),
+                                      device=logits.device, dtype=sval_f.dtype)
+                tgt_mat = torch.zeros((labels.shape[0], max_m),
+                                      device=logits.device, dtype=stgt_f.dtype)
+                valid_mat = torch.zeros((labels.shape[0], max_m),
+                                        dtype=torch.bool, device=logits.device)
+                exp_mat[srow, pos_in_row] = sval_f
+                tgt_mat[srow, pos_in_row] = stgt_f
+                valid_mat[srow, pos_in_row] = svalid
+                fmasked = tgt_mat * valid_mat.to(tgt_mat.dtype)
+                pref = torch.cumsum(fmasked, dim=1)
+                pcnt = torch.cumsum(valid_mat.to(torch.int64), dim=1)
+                ks = torch.arange(max_m, device=logits.device)
+                lo = (ks - 5).clamp_min(0)
+                hi = (ks + 6).clamp(min=1, max=max_m)
+                sum_hi = pref.gather(1, (hi - 1).expand(labels.shape[0], -1))
+                cnt_hi = pcnt.gather(1, (hi - 1).expand(labels.shape[0], -1))
+                lo_nz = lo.clamp_min(1)
+                sum_lo = torch.where(
+                    (lo > 0).expand(labels.shape[0], -1),
+                    pref.gather(1, (lo_nz - 1).expand(labels.shape[0], -1)),
+                    torch.zeros((), device=logits.device, dtype=pref.dtype))
+                cnt_lo = torch.where(
+                    (lo > 0).expand(labels.shape[0], -1),
+                    pcnt.gather(1, (lo_nz - 1).expand(labels.shape[0], -1)),
+                    torch.zeros((), device=logits.device, dtype=pcnt.dtype))
+                wsum = sum_hi - sum_lo
+                wcnt = (cnt_hi - cnt_lo).to(wsum.dtype)
+                means = wsum / wcnt.clamp_min(1)
+                dev = (exp_mat - means).abs()
+                # Rows with <2 notes contribute nothing (as before); masked
+                # mean keeps this sync-free (0/1 = 0 when nothing qualifies).
+                keep = valid_mat & row_counts.ge(2)[:, None]
+                stretch_all = torch.where(
+                    keep, torch.relu(dev - self.config.stretch_margin),
+                    torch.zeros((), device=logits.device, dtype=dev.dtype))
+                stretch_mean = stretch_all.sum() / keep.sum().clamp_min(1).to(
+                    stretch_all.dtype)
         loss = (self.config.ce_weight * (ce_loss + smooth_delta)
                 + self.config.pitch_alpha * pitch_mean + self.config.type_alpha * type_loss
                 + self.config.position_alpha * position_mean
