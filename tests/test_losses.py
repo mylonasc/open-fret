@@ -209,6 +209,8 @@ def test_unavailable_strings_are_not_candidates_or_targets():
 @pytest.mark.parametrize("kwargs", [
     {"pitch_alpha": -1}, {"pitch_alpha": math.nan}, {"smoothing": 1},
     {"smoothing": -0.1}, {"smoothing": math.inf}, {"ce_weight": -1},
+    {"position_alpha": -0.5}, {"span_alpha": -1}, {"stretch_alpha": math.nan},
+    {"span_margin": -1}, {"stretch_margin": 2.5},
 ])
 def test_bad_loss_settings_rejected(kwargs):
     with pytest.raises(ValueError):
@@ -247,6 +249,101 @@ def test_weighted_combined_objective_and_non_note_batches():
     assert torch.isfinite(scores.grad).all()
     loss, parts = objective(config, scores, ["TS_480", "[EOS]"])
     assert torch.allclose(loss, 0.3 * parts["ce"])
+
+
+def _one_hot_scores(token, val=20.0):
+    scores = torch.full((1, 1, len(TOKENS)), -20.0)
+    scores[0, 0, IDS[token]] = val
+    return scores
+
+
+def test_positional_matches_expected_fret_distance():
+    # Target TAB_2_5 (fret 5); all mass on TAB_2_3 (same string, fret 3).
+    _, parts = objective(LossConfig(position_alpha=1.0),
+                         _one_hot_scores("TAB_2_3"), ["TAB_2_3"])
+    assert parts["position"] == 0.0
+    _, parts = objective(LossConfig(position_alpha=1.0),
+                         _one_hot_scores("TAB_2_3"), ["TAB_2_5"])
+    assert parts["position"] == pytest.approx(2.0)
+    # Split mass across same-string candidates averages the expectation.
+    scores = torch.full((1, 1, len(TOKENS)), -20.0)
+    scores[0, 0, IDS["TAB_2_3"]] = 20.0
+    scores[0, 0, IDS["TAB_2_5"]] = 20.0
+    _, parts = objective(LossConfig(position_alpha=1.0), scores, ["TAB_2_5"])
+    assert parts["position"] == pytest.approx(1.0)
+    # Open-string targets are excluded, like the reference formulation.
+    _, parts = objective(LossConfig(position_alpha=1.0),
+                         _one_hot_scores("TAB_6_2"), ["TAB_1_0"])
+    assert parts["position"] == 0.0
+
+
+def test_span_hinge_counts_onset_groups_and_margin():
+    # Same onset, frets 9 and 5: span 4 == margin -> zero.
+    scores = torch.cat([_one_hot_scores("TAB_3_9"), _one_hot_scores("TAB_2_5")], dim=1)
+    _, parts = objective(LossConfig(span_alpha=1.0, span_margin=4), scores,
+                         ["TAB_3_9", "TAB_2_5"])
+    assert parts["span_groups"] == 1
+    assert parts["span"] == 0.0
+    # Expected frets 9 vs 3 across the onset: span 6, hinge at 4 -> 2.
+    scores = torch.cat([_one_hot_scores("TAB_3_9"), _one_hot_scores("TAB_2_3")], dim=1)
+    _, parts = objective(LossConfig(span_alpha=1.0, span_margin=4), scores,
+                         ["TAB_3_9", "TAB_2_5"])
+    assert parts["span"] == pytest.approx(2.0)
+    # Single-note onsets and open strings never form a span group.
+    scores = torch.cat([_one_hot_scores("TAB_3_9"),
+                        torch.full((1, 1, len(TOKENS)), -20.0)], dim=1)
+    scores[0, 1, IDS["TS_480"]] = 20.0
+    _, parts = objective(LossConfig(span_alpha=1.0), scores,
+                         ["TAB_3_9", "TS_480"])
+    assert parts["span_groups"] == 0
+    assert parts["span"] == 0.0
+
+
+def test_stretch_hinge_tracks_local_smoothness():
+    line = ["TAB_1_0", "TS_480", "TAB_1_2", "TS_480", "TAB_2_5",
+            "TS_480", "TAB_1_2", "TS_480", "TAB_1_0"]
+    scores = torch.cat([
+        _one_hot_scores(t) if not t.startswith("TS_") else
+        torch.full((1, 1, len(TOKENS)), -20.0).scatter_(2, torch.tensor([[[IDS[t]]]]), 20.0)
+        for t in line], dim=1)
+    _, parts = objective(LossConfig(stretch_alpha=1.0, stretch_margin=5),
+                         scores, line)
+    assert parts["stretch"] == 0.0
+    # Same line with the middle note jumped an octave up the same pitch set
+    # is impossible here without a new token, so force mass far away instead:
+    # mass on TAB_6_2 (fret 2) for the middle TAB_2_5 keeps it smooth;
+    # relocate mass to TAB_3_9's string is already tested; use margin 1.
+    _, parts = objective(LossConfig(stretch_alpha=1.0, stretch_margin=1),
+                         scores, line)
+    # fretted targets [2,5,2] (opens excluded from the window means):
+    # middle |5 - 3| = 2 -> hinge(2-1) = 1, sides |2-3| = 1 -> 0.
+    assert parts["stretch"] == pytest.approx(1 / 3)
+
+
+def test_playability_terms_disabled_by_default_and_combine():
+    scores = torch.randn(1, 3, len(TOKENS), requires_grad=True)
+    _, parts = objective(LossConfig(), scores, ["TAB_3_9", "TAB_2_5", "TS_480"])
+    assert parts["position"] == 0.0 and parts["span"] == 0.0
+    assert parts["stretch"] == 0.0 and parts["span_groups"] == 0
+    config = LossConfig(position_alpha=2.0, span_alpha=3.0, stretch_alpha=0.5)
+    loss, parts = objective(config, scores, ["TAB_3_9", "TS_480", "TAB_2_3"])
+    assert torch.allclose(
+        loss, parts["ce"] + 2.0 * parts["position"]
+        + 3.0 * parts["span"] + 0.5 * parts["stretch"])
+    loss.backward()
+    assert torch.isfinite(scores.grad).all()
+
+
+def test_playability_terms_survive_padding_and_second_rows():
+    scores = torch.randn(2, 3, len(TOKENS), requires_grad=True)
+    labels = torch.tensor([[IDS["TAB_3_9"], IDS["TAB_2_5"], -100],
+                           [IDS["TAB_1_2"], IDS["TS_480"], IDS["TAB_6_2"]]])
+    config = LossConfig(position_alpha=1.0, span_alpha=1.0, stretch_alpha=1.0)
+    loss, parts = TabLoss(META, config)(scores, labels, torch.cat([prefix(), prefix()]))
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert torch.isfinite(scores.grad).all()
+    assert float(parts["span_groups"]) >= 0
 
 
 def test_source_conditioning_handles_unseen_tuning_prefix_without_guessing():

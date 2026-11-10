@@ -123,6 +123,77 @@ is token-local only — alternatives need not be jointly playable in a chord.
 
 *Current setting: $\varepsilon = 0.1$ with $w_{\mathrm{ce}} = 0.3$.*
 
+### 6. Positional distance
+
+Mean absolute error between the expected fret and the reference fret, over
+fretted targets (open strings excluded, as in Noise2Fret):
+
+$$
+\bar{P}_{\mathrm{pos}} = \frac{1}{N}\sum_{b} \bigl|\mathbb{E}[f_b] - f^{\mathrm{target}}_b\bigr|,
+\qquad
+\mathbb{E}[f_b] = \sum_{f} f \cdot P(\mathrm{fret}=f \mid \mathrm{string}_b).
+$$
+
+The expectation runs over the same candidate tables as the pitch marginal —
+softmax over same-string TAB tokens, no argmax anywhere.
+
+**Motivation.** Pitch-only supervision accepts any correct pitch *anywhere*
+on the neck, including unplayable high positions for simple passages. This
+term prices the *where*: it rewards putting the hand where the reference
+put it, while the pitch marginal still allows equivalent fingerings to share
+probability mass.
+
+*Current setting: $\alpha_{\mathrm{pos}} = 0$ (opt-in).*
+
+### 7. Expected hand-span hinge
+
+Per onset group (TABs sounding at the same tick), the expected span is the
+max minus the min expected fret over fretted target strings (opens excluded),
+hinged at a margin $M$:
+
+$$
+\bar{S} = \mathrm{mean}_{\mathrm{groups}}\,
+  \max\bigl(0,\ (\max_s \mathbb{E}[f_s] - \min_s \mathbb{E}[f_s]) - M\bigr).
+$$
+
+This is one quantity with two literature names: the **stretch** metric of
+midi-to-tab (max fret distance within simultaneous onsets, Table 1) and the
+**hand-span feasibility loss** of Noise2Fret (their hinge with $M=6$, the max
+span observed in GOAT). On this corpus, 98.9% of onsets span ≤ 4 frets and
+spans ≥ 5 are the top ~1% outliers — so the default $M = 4$ (a standard
+four-fret hand box) fires only on genuinely wide shapes.
+
+*Current setting: $\alpha_{\mathrm{span}} = 0$, $M = 4$ (both opt-in).*
+
+### 8. Neighbourhood-deviation stretch
+
+The trainable form of midi-to-tab's §4.4 relocation rule: for each fretted
+note, compare its expected fret against the mean of the ±5 neighbouring
+notes' reference frets (an 11-note run, opens excluded), hinged at a margin:
+
+$$
+\bar{D} = \mathrm{mean}_{b}\,
+  \max\bigl(0,\ |\mathbb{E}[f_b] - \mathrm{mean}_{\pm5}(f^{\mathrm{target}})| - M_d\bigr),
+\qquad M_d = 5\ \text{(their MAX\\_DEVIATION)}.
+$$
+
+Where the span hinge prices chord *width*, this prices *jumps*: a lone note
+far up the neck between open-position phrases. Same expected-fret machinery,
+different axis — both are HPO-tunable separately.
+
+*Current setting: $\alpha_{\mathrm{stretch}} = 0$, $M_d = 5$ (both opt-in).*
+
+### Decoding-side relocation (no training)
+
+midi-to-tab §4.4 as a post-pass (`open_fret.postprocess.relocate_deviating_notes`,
+opt-in `--relocate-deviating` in `scripts/inference.py`): for each note, if
+its fret exceeds the max or deviates from the ±5-note local mean by more
+than the threshold, move it to a free open string, else to the free string
+whose required fret is closest to the mean. Pitch is preserved exactly by
+construction; fully occupied neighbourhoods are left untouched and reported.
+On their data this touched only 0.53% of notes — it is a safety net for
+outliers, not a voicing engine.
+
 ## Worked micro-example
 
 Target `TAB_1_14` at 100 BPM, standard tuning, capo 0: pitch
@@ -135,22 +206,42 @@ splits $\varepsilon$ uniformly across the plain (technique-free) ones.
 ## Roadmap
 
 Implemented (S2 slice): pitch marginal, conditional variant, event-type
-marginal, equivalence smoothing, strict parsing, onset-level curation,
-anchored decoding.
+marginal, equivalence smoothing, **positional distance, expected-span hinge,
+neighbourhood-deviation stretch, and the midi-to-tab §4.4 relocation
+pass**, strict parsing, onset-level curation, anchored decoding.
+
+Related work this builds on:
+
+- [TabCNN](https://github.com/andywiggins/tab-cnn) (Wiggins & Kim, ISMIR
+  2019) — the CNN baseline and the standard tab metrics (pitch/tab
+  precision/recall/F-measure, tab disambiguation rate) this project
+  compares against.
+- [Noise2Fret](https://arxiv.org/abs/2608.30854) ([code](https://github.com/RiccardoVib/Noise2Fret)) —
+  five auxiliary losses (pitch-class, circle-of-fifths, positional,
+  string-similarity, hand-span) with ablations; our positional/span terms
+  follow their soft-distribution formulation.
+- [MIDI-to-Tab](https://arxiv.org/pdf/2408.05024) — stretch metric, user
+  study on playability, and the §4.4 neighbourhood relocation our decoding
+  pass implements.
 
 Still open, in the epic's recommended order:
 
-1. **Isolated ablations with promotion gates.** The running full models
-   combine everything; each term still needs a same-decoder CE-control
+1. **Isolated ablations with promotion gates, now including playability.**
+   The running full models combine everything; each term — including the new
+   positional/span/stretch weights — still needs a same-decoder CE-control
    comparison on generated-note metrics (pitch preservation, exact
-   fingering agreement, termination/loops) before it earns its place.
+   fingering agreement, termination/loops, plus span/proximity proxies)
+   before it earns its place. Per the loss-study protocol, run one Optuna
+   study per weight combination (weights are fixed per study, not searched)
+   and compare on the frozen panel, never on scalar `eval_loss`.
 2. **Held-out test evaluation.** Test scores are reported, never selected
    on; the S0 evaluation contract (frozen manifest, immutable panel) governs
    this.
-3. **Timing/occupancy/playability regularizer.** Current equivalence is
-   token-local: alternatives need not be jointly playable, and nothing prices
-   hand position, stretches, or string occupancy. This is the biggest known
-   modeling gap.
+3. **Timing/occupancy regularizers beyond onsets.** The span hinge prices
+   simultaneous width; sustained-string occupancy across onsets and position
+   *shifts* (hand travel between onsets) are still unpriced. Deferred with
+   the Viterbi/Yazawa-style transition decoding and the data-driven pairwise
+   feasibility model — deliberately not implemented here.
 4. **Bend and articulation contours.** The marginal matches base pitch only;
    bends, slides and vibrato need continuous treatment.
 5. **Free-running alignment.** All marginals are teacher-forced; aligning

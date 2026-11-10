@@ -476,7 +476,12 @@ def run_study(args):
         training_args.update(pitch_loss_alpha=loss_config.pitch_alpha,
                              equivalence_smoothing=loss_config.smoothing,
                              ce_loss_weight=loss_config.ce_weight, event_type_alpha=loss_config.type_alpha,
-                             conditional_pitch=loss_config.conditional_pitch)
+                             conditional_pitch=loss_config.conditional_pitch,
+                             position_alpha=loss_config.position_alpha,
+                             span_alpha=loss_config.span_alpha,
+                             span_margin=loss_config.span_margin,
+                             stretch_alpha=loss_config.stretch_alpha,
+                             stretch_margin=loss_config.stretch_margin)
         json.dump({"params": selected, "training_args": training_args, "value": study.best_value,
                    "loss": loss_config.to_dict(),
                    "study": args.study_name, "init_from": args.init_from,

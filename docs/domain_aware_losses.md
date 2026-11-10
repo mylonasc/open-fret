@@ -145,6 +145,42 @@ The resulting soft CE is averaged over all non-padding target positions.
 Padding (`-100`) contributes nothing. No-note/all-ignored custom-loss batches
 have finite auxiliary loss zero. All-ignored batches have total loss zero.
 
+### Positional distance, span hinge, neighbourhood stretch
+
+Three opt-in playability terms share the candidate tables (no vocab² anywhere)
+and reuse expected frets — softmax over each string's candidate TAB tokens,
+never argmax. See the website [losses page](../../website/docs/losses.md) for
+the math; the pattern mirrors the pitch marginal.
+
+```bash
+python scripts/train_model.py --run-name play-v1 \
+  --cache-dir dataset/processed/loss-v4-curated-20261109/cache \
+  --tokenizer-dir dataset/processed/loss-v4-curated-20261109/tab_tokenizer \
+  --position-alpha 0.5 --span-alpha 0.5 --span-margin 4 \
+  --stretch-alpha 0.5 --stretch-margin 5
+```
+
+- `--position-alpha`: mean |E[fret] − target| over fretted notes. Prices the
+  *where*, not just the pitch (Noise2Fret positional distance formulation).
+- `--span-alpha` / `--span-margin` (default 4): hinge on the per-onset
+  expected max−min fret (opens excluded) — the midi-to-tab stretch quantity
+  and Noise2Fret hand-span hinge in one term. On loss-v4, 98.9% of onsets
+  span ≤ 4 frets, so the default margin fires only on the top ~1% shapes.
+- `--stretch-alpha` / `--stretch-margin` (default 5): hinge on |E[fret] −
+  ±5-note local mean| — the trainable form of midi-to-tab §4.4's
+  MAX_DEVIATION relocation rule. Prices jumps; span prices chord width.
+- Decoding side (no training): `open_fret.postprocess.relocate_deviating_notes`
+  implements §4.4 verbatim (open string preferred, else closest-to-mean free
+  string, pitch preserved by construction); opt in with
+  `scripts/inference.py --relocate-deviating`.
+
+All three log raw and weighted components (`position_loss`, `span_loss`,
+`stretch_loss`, `span_groups`) with the same per-microbatch means convention.
+Loss weights are fixed per Optuna study (same-study reuse with changed loss
+flags is rejected); tune combinations by comparing separate studies on the
+frozen panel, exactly like the existing ablations. Do not compare scalar
+`eval_loss` across different objectives.
+
 Equivalence is token-local: alternatives need not be jointly playable in a chord.
 There is no timing/occupancy/playability regularizer in this slice. Pitch-aware
 supervision can lower exact reference-fingering agreement while preserving pitch.

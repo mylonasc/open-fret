@@ -24,6 +24,11 @@ class LossConfig:
     max_fret: int = 24
     type_alpha: float = 0.0
     conditional_pitch: bool = False
+    position_alpha: float = 0.0
+    span_alpha: float = 0.0
+    span_margin: int = 4
+    stretch_alpha: float = 0.0
+    stretch_margin: int = 5
 
     def __post_init__(self):
         if not math.isfinite(self.ce_weight) or self.ce_weight <= 0:
@@ -36,10 +41,19 @@ class LossConfig:
             raise ValueError("max_fret must be between 0 and 127")
         if not math.isfinite(self.type_alpha) or self.type_alpha < 0:
             raise ValueError("type_alpha must be finite and nonnegative")
+        for name in ("position_alpha", "span_alpha", "stretch_alpha"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        for name in ("span_margin", "stretch_margin"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
 
     @property
     def enabled(self):
-        return bool(self.ce_weight != 1.0 or self.pitch_alpha or self.smoothing or self.type_alpha or self.conditional_pitch)
+        return bool(self.ce_weight != 1.0 or self.pitch_alpha or self.smoothing or self.type_alpha or self.conditional_pitch
+                    or self.position_alpha or self.span_alpha or self.stretch_alpha)
 
     def to_dict(self):
         return {"version": 2, **asdict(self)}
@@ -50,6 +64,8 @@ class TabLoss(nn.Module):
 
     Candidate storage is strings × frets × technique variants, never vocab².
     Smoothing is limited to technique-free TAB targets and alternatives.
+    Playability terms reuse the same candidate tables: expected frets come
+    from per-string candidate distributions, never from argmax decoding.
     """
 
     def __init__(self, metadata: TokenMetadata, config: LossConfig, eos_token_id=None):
@@ -73,6 +89,15 @@ class TabLoss(nn.Module):
         note_fret = torch.zeros(vocab_size, dtype=torch.long)
         plain = torch.zeros(vocab_size, dtype=torch.bool)
         is_tab = torch.tensor([t.startswith("TAB_") for t in metadata.tokens])
+        # Absolute time-shift deltas per token id for onset grouping
+        # (playability terms aggregate notes that sound together).
+        ts_delta = torch.zeros(vocab_size, dtype=torch.long)
+        for i, t in enumerate(metadata.tokens):
+            if t.startswith("TS_"):
+                try:
+                    ts_delta[i] = int(t.split("_", 1)[1])
+                except ValueError:
+                    continue
         if eos_token_id is None:
             eos_token_id = next((i for i, t in enumerate(metadata.tokens) if t in ("[EOS]", "</s>")), None)
         if config.type_alpha and eos_token_id is None:
@@ -107,11 +132,53 @@ class TabLoss(nn.Module):
         for name, table in {
             "tunings": tuning_table, "capos": capo_table,
             "note_string": note_string, "note_fret": note_fret,
-            "plain": plain, "is_tab": is_tab,
+            "plain": plain, "is_tab": is_tab, "ts_delta": ts_delta,
             "candidates": candidate_table, "plain_candidates": plain_table,
             "event_type": event_type,
         }.items():
             self.register_buffer(name, table, persistent=False)
+
+    def _expected_frets(self, log_probs, batch, time, tuning):
+        """Expected fret per string from candidate TAB distributions.
+
+        For each note position and string, softmax over that string's
+        candidate (string, fret) token log-probs; the expectation is the
+        probability-weighted fret. Returns (expected [N, S] float,
+        have [N, S] bool); strings with no valid candidate fret (e.g.
+        unavailable tuning strings) are flagged in `have`.
+        """
+        strings = tuning.shape[1]
+        frets = torch.arange(self.config.max_fret + 1, device=log_probs.device,
+                             dtype=log_probs.dtype)
+        n = len(batch)
+        expected = log_probs.new_zeros(n, strings)
+        have = torch.zeros(n, strings, dtype=torch.bool, device=log_probs.device)
+        tune = tuning[batch]
+        neg = torch.full((), -float("inf"), device=log_probs.device,
+                         dtype=log_probs.dtype)
+        for s in range(strings):
+            ids = self.candidates[s]
+            ok_tune = tune[:, s].ge(0)
+            if not ok_tune.any():
+                continue
+            lp = log_probs[batch[:, None, None], time[:, None, None],
+                           ids.clamp_min(0).expand(n, -1, -1)]
+            mask = ids.ge(0).expand(n, -1, -1) & ok_tune[:, None, None]
+            ll = lp.masked_fill(~mask, neg).logsumexp(-1)
+            frow_ok = mask.any(-1)
+            row_ok = frow_ok.any(-1)
+            shifted = torch.where(frow_ok, ll,
+                                  torch.zeros((), device=log_probs.device,
+                                             dtype=log_probs.dtype))
+            shift = torch.where(row_ok[:, None], shifted.max(-1, keepdim=True).values,
+                                torch.zeros((), device=log_probs.device,
+                                           dtype=log_probs.dtype))
+            exp = (shifted - shift).exp().masked_fill(~frow_ok, 0.0)
+            total = exp.sum(-1, keepdim=True).clamp_min(1e-12)
+            probs = torch.where(row_ok[:, None], exp / total, torch.zeros_like(exp))
+            expected[:, s] = (probs * frets).sum(-1)
+            have[:, s] = row_ok
+        return expected, have
 
     def forward(self, logits, labels, input_ids, loss_tuning=None, loss_capo=None):
         if logits.shape[:-1] != labels.shape or logits.shape[-1] != len(self.plain):
@@ -131,8 +198,11 @@ class TabLoss(nn.Module):
                                        ignore_index=-100) if count else zero)
         metrics = {"ce": ce_loss.detach(), "pitch": zero.detach(),
                     "type": zero.detach(),
+                   "position": zero.detach(), "span": zero.detach(),
+                   "stretch": zero.detach(),
                    "smoothing_delta": zero.detach(), "tokens": count.detach(),
-                   "notes": zero.detach(), "smoothed_notes": zero.detach()}
+                   "notes": zero.detach(), "smoothed_notes": zero.detach(),
+                   "span_groups": zero.detach()}
         if not self.config.enabled:
             return ce_loss, metrics
         safe_labels = labels.masked_fill(~active, 0)
@@ -222,8 +292,74 @@ class TabLoss(nn.Module):
             smoothed_count = eligible.sum()
         pitch_mean = pitch_sum / metrics["notes"].clamp_min(1)
         smooth_delta = self.config.smoothing * smooth_sum / count.clamp_min(1)
+        position_mean, span_mean, stretch_mean = zero, zero, zero
+        span_group_count = zero.detach()
+        if self.config.position_alpha or self.config.span_alpha or self.config.stretch_alpha:
+            expected, have_expected = self._expected_frets(log_probs, batch, time, tuning)
+            target_fret = self.note_fret[target].float()
+            fretted = target_fret.gt(0)
+            if self.config.position_alpha and fretted.any():
+                # Noise2Fret-style positional distance: mean |E[fret] - target|
+                # over fretted targets (opens excluded, as in the paper).
+                position_mean = (expected[torch.arange(len(batch), device=logits.device), target_string]
+                                 .sub(target_fret).abs().masked_fill(~fretted, 0).sum()
+                                 / fretted.sum().clamp_min(1))
+            if self.config.span_alpha or self.config.stretch_alpha:
+                ticks = self.ts_delta[labels.clamp_min(0)].cumsum(-1)
+                note_ticks = ticks[batch, time]
+            if self.config.span_alpha:
+                # Expected hand-span hinge per onset group: max-min expected
+                # fret over fretted target strings (midi-to-tab stretch and
+                # Noise2Fret hand-span share this per-onset quantity).
+                span_vals = []
+                for row in batch.unique():
+                    sel = batch.eq(row)
+                    for tick in note_ticks[sel].unique():
+                        gsel = sel & note_ticks.eq(tick)
+                        gidx = gsel.nonzero().squeeze(-1)
+                        strings = target_string[gidx]
+                        keep = target_fret[gidx].gt(0) & have_expected[gidx, strings]
+                        if keep.sum() < 2:
+                            continue
+                        kept = gidx[keep]
+                        vals = expected[kept, strings[keep]]
+                        span_vals.append(vals.max() - vals.min())
+                if span_vals:
+                    span_stack = torch.stack(span_vals)
+                    span_mean = torch.relu(span_stack - self.config.span_margin).mean()
+                    span_group_count = torch.tensor(len(span_vals), device=logits.device)
+            if self.config.stretch_alpha:
+                # midi-to-tab neighbourhood deviation: per-note expected fret
+                # vs the ±5-note local mean (their MAX_DEVIATION run of 11),
+                # hinged at the margin. Only fretted targets participate.
+                stretch_vals = []
+                for row in range(labels.shape[0]):
+                    idx = (batch == row).nonzero().squeeze(-1)
+                    if idx.numel() < 2:
+                        continue
+                    order = torch.argsort(time[idx], stable=True)
+                    idx = idx[order]
+                    exp_f = expected[idx, target_string[idx]]
+                    tgt_f = target_fret[idx]
+                    for k in range(idx.numel()):
+                        if tgt_f[k] <= 0:
+                            continue
+                        lo, hi = max(0, k - 5), min(idx.numel(), k + 6)
+                        window = tgt_f[lo:hi]
+                        window = window[window.gt(0)]
+                        if window.numel() == 0:
+                            continue
+                        stretch_vals.append((exp_f[k] - window.float().mean()).abs())
+                if stretch_vals:
+                    stretch_stack = torch.stack(stretch_vals)
+                    stretch_mean = torch.relu(stretch_stack - self.config.stretch_margin).mean()
         loss = (self.config.ce_weight * (ce_loss + smooth_delta)
-                + self.config.pitch_alpha * pitch_mean + self.config.type_alpha * type_loss)
+                + self.config.pitch_alpha * pitch_mean + self.config.type_alpha * type_loss
+                + self.config.position_alpha * position_mean
+                + self.config.span_alpha * span_mean
+                + self.config.stretch_alpha * stretch_mean)
         metrics.update(pitch=pitch_mean.detach(), smoothing_delta=smooth_delta.detach(),
-                       smoothed_notes=smoothed_count.detach())
+                       smoothed_notes=smoothed_count.detach(),
+                       position=position_mean.detach(), span=span_mean.detach(),
+                       stretch=stretch_mean.detach(), span_groups=span_group_count.detach())
         return loss, metrics

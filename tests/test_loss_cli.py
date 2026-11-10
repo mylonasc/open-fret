@@ -59,6 +59,9 @@ def fixture_cache(tmp_path_factory):
 
 @pytest.mark.parametrize("flag,value", [(None, None), ("--pitch-loss-alpha", "0.3"),
                                        ("--equivalence-smoothing", "0.1"),
+                                       ("--position-alpha", "0.5"),
+                                       ("--span-alpha", "0.5"),
+                                       ("--stretch-alpha", "0.5"),
                                        ('--sampling-strategy', 'source')])
 def test_training_cli_from_fixture_cache(fixture_cache, flag, value):
     out = fixture_cache / (flag or "ce").removeprefix("--")

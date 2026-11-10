@@ -30,7 +30,7 @@ def chunk_tokens(tokens, budget=DEFAULT_MAX_INPUT - 2):
 def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
                    max_new_tokens=DEFAULT_MAX_OUTPUT, deterministic=True,
                     capo=0, tuning=None, decoding_mode="anchored", beams=4,
-                    instrument=None, return_report=False):
+                    instrument=None, return_report=False, relocate_outliers=False):
     from transformers import T5ForConditionalGeneration, AutoTokenizer
     from open_fret.midi_io import add_conditioning
     from open_fret.generation import generate_tab
@@ -58,6 +58,20 @@ def run_inference(midi_path, model_dir, max_input_tokens=DEFAULT_MAX_INPUT,
                               max_input_tokens=max_input_tokens, max_new_tokens=max_new_tokens,
                               stochastic=not deterministic)
     result['midi'] = metadata
+    if relocate_outliers:
+        # midi-to-tab §4.4: move outlier fingerings toward the local hand
+        # position after identity-preserving correction. Pitch is preserved
+        # exactly; only string/fret change, so token structure is untouched.
+        from open_fret.postprocess import notes_to_tab_tokens, relocate_deviating_notes
+        corrected = [dict(n) for n in result['correction']['corrected_notes']]
+        moved, rel_report = relocate_deviating_notes(
+            corrected, tuning=result['tuning'], capo=result['capo'])
+        result['corrected_tokens'] = notes_to_tab_tokens(moved)
+        result['relocation'] = {"relocated": rel_report.relocated,
+                                "checked": rel_report.checked,
+                                "out_of_range": rel_report.out_of_range,
+                                "unavailable": rel_report.unavailable,
+                                "details": rel_report.details}
     return result if return_report else ' '.join(result['corrected_tokens'])
 
 
@@ -83,6 +97,9 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_OUTPUT)
     parser.add_argument("--decoding-mode", choices=["anchored", "legacy"], default="anchored")
     parser.add_argument("--beams", type=int, default=4)
+    parser.add_argument("--relocate-outliers", action="store_true",
+                        help="midi-to-tab §4.4: relocate outlier fingerings toward "
+                        "the local hand position after correction (pitch-preserving).")
     args = parser.parse_args()
     midi_path = args.midi or args.input
     if not midi_path:
@@ -94,7 +111,7 @@ def main():
                             deterministic=not args.stochastic,
                              decoding_mode=args.decoding_mode, beams=args.beams,
                              capo=args.capo, tuning=args.tuning, instrument=args.instrument,
-                             return_report=True)
+                             return_report=True, relocate_outliers=args.relocate_outliers)
     import json
     from open_fret.viewer import renderer_for_input
     from open_fret.midi_io import add_conditioning
@@ -118,6 +135,9 @@ def main():
     print(f"Windows: {len(result['windows'])}; corrections: "
           f"{result['correction']['refingered']} refingered, "
           f"{result['correction']['inserted']} inserted, {result['correction']['dropped_extra']} dropped")
+    if "relocation" in result:
+        print(f"Relocation: {result['relocation']['relocated']} moved "
+              f"({result['relocation']['checked']} checked)")
     print("\n--- AlphaTex Output (.tex) ---\n" + tex)
     print("\n--- ASCII Tablature (onset preview) ---\n" + ascii_tab)
     print("--------------------------------------")

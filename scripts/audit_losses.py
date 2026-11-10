@@ -77,17 +77,30 @@ def conflict_stats(ds, metadata, limit):
             'conflict_group_rate': duplicate_notes / max(conflict_groups_total, 1)}
 
 
-def independent_loss(metadata, logits, labels, tuning, capo, conditional=False):
+def independent_loss(metadata, logits, labels, tuning, capo, conditional=False,
+                     span_margin=4, stretch_margin=5):
     """Literal per-position formulas; deliberately avoids vector tricks."""
     import torch
+    from open_fret.token_metadata import MAX_STRINGS
     ce_terms = []
     pitch_terms = []
     baseline_terms = []
+    position_terms = []
+    stretch_terms = []
+    span_by_group = {}
     for row in range(labels.shape[0]):
         tune = [int(x) for x in tuning[row]]
+        tick, note_order = 0, []
         for pos in range(labels.shape[1]):
             target = int(labels[row, pos])
             if target == -100:
+                continue
+            tok = metadata.tokens[target]
+            if tok.startswith("TS_"):
+                try:
+                    tick += int(tok.split("_", 1)[1])
+                except ValueError:
+                    pass
                 continue
             logp = logits[row, pos].float().log_softmax(-1)
             ce_terms.append(float((-logp[target]).detach()))
@@ -95,6 +108,8 @@ def independent_loss(metadata, logits, labels, tuning, capo, conditional=False):
             if note is None:
                 continue
             string, fret, _ = note
+            if not 1 <= string <= MAX_STRINGS or fret > 24:
+                continue
             pitch = int(tuning[row, string - 1]) + int(capo[row]) + fret
             equivalents = [i for i in range(len(metadata.tokens))
                            if metadata.pitch(i, tune, int(capo[row])) == pitch]
@@ -103,11 +118,47 @@ def independent_loss(metadata, logits, labels, tuning, capo, conditional=False):
                 playable = [i for i in range(len(metadata.tokens))
                             if metadata.pitch(i, tune, int(capo[row])) is not None]
                 baseline_terms.append(float(torch.logsumexp(logp[playable], 0).detach()))
+            exp_frets = {}
+            for s in range(1, MAX_STRINGS + 1):
+                if not 0 <= (tune[s - 1] if s - 1 < len(tune) else -1):
+                    continue
+                ids = [i for i in range(len(metadata.tokens))
+                       if metadata.note(i) is not None and metadata.note(i)[0] == s
+                       and 0 <= metadata.note(i)[1] <= 24]
+                if not ids:
+                    continue
+                weights = torch.softmax(logp[ids], 0)
+                exp_frets[s] = float((weights * torch.tensor(
+                    [metadata.note(i)[1] for i in ids])).sum())
+            if fret > 0:
+                position_terms.append(abs(exp_frets.get(string, 0.0) - fret))
+            note_order.append((tick, string, fret, exp_frets))
+            key = (row, tick)
+            span_by_group.setdefault(key, []).append((string, fret, exp_frets))
+    for (row, tick), members in span_by_group.items():
+        fretted = [(s, f, e) for s, f, e in members if f > 0 and s in e]
+        if len(fretted) < 2:
+            continue
+        span = max(e[s] for s, _, e in fretted) - min(e[s] for s, _, e in fretted)
+        span_by_group[(row, tick)] = max(0.0, span - span_margin)
+    span_vals = [v for v in span_by_group.values() if isinstance(v, float)]
+    for idx, (tick, string, fret, exp) in enumerate(note_order):
+        if fret <= 0:
+            continue
+        window = [f for _, _, f, _ in note_order[max(0, idx - 5):idx + 6] if f > 0]
+        if not window:
+            continue
+        stretch_terms.append(abs(exp.get(string, 0.0) - sum(window) / len(window)))
+    stretch_vals = [max(0.0, v - stretch_margin) for v in stretch_terms]
     notes = max(len(pitch_terms), 1)
     return {'ce': sum(ce_terms) / max(len(ce_terms), 1),
             'pitch_marginal': sum(pitch_terms) / notes,
             'pitch_baseline': sum(baseline_terms) / notes,
             'pitch': (sum(pitch_terms) + sum(baseline_terms)) / notes,
+            'position': sum(position_terms) / max(len(position_terms), 1),
+            'span': sum(span_vals) / max(len(span_vals), 1),
+            'n_span_groups': len(span_vals),
+            'stretch': sum(stretch_vals) / max(len(position_terms), 1),
             'tokens': len(ce_terms), 'notes': len(pitch_terms)}
 
 
@@ -149,7 +200,9 @@ def main():
         logits = model(**inputs).logits
     logits = logits.detach().requires_grad_(True)
     config = LossConfig(ce_weight=0.3, pitch_alpha=1.0, smoothing=0.1,
-                        type_alpha=0.3, conditional_pitch=True)
+                        type_alpha=0.3, conditional_pitch=True,
+                        position_alpha=0.5, span_alpha=0.5, span_margin=4,
+                        stretch_alpha=0.5, stretch_margin=5)
     objective = TabLoss(metadata, config, eos_token_id=tok.eos_token_id)
     loss, parts = objective(logits, inputs['labels'], inputs['input_ids'],
                             loss_tuning=tuning, loss_capo=capo)
@@ -160,10 +213,16 @@ def main():
         'ce': float(parts['ce']), 'reference': reference,
         'ce_abs_error': abs(float(parts['ce']) - reference['ce']),
         'pitch_abs_error': abs(float(parts['pitch']) - reference['pitch']),
+        'position_abs_error': abs(float(parts['position']) - reference['position']),
+        'span_abs_error': abs(float(parts['span']) - reference['span']),
+        'stretch_abs_error': abs(float(parts['stretch']) - reference['stretch']),
         'weighted_identity_error': abs(float(loss) - (
             config.ce_weight * (float(parts['ce']) + float(parts['smoothing_delta']))
             + config.pitch_alpha * float(parts['pitch'])
-            + config.type_alpha * float(parts['type']))),
+            + config.type_alpha * float(parts['type'])
+            + config.position_alpha * float(parts['position'])
+            + config.span_alpha * float(parts['span'])
+            + config.stretch_alpha * float(parts['stretch']))),
     }
     loss.backward()
     report['independent_check']['finite_gradients'] = bool(torch.isfinite(logits.grad).all())

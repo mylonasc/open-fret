@@ -25,6 +25,16 @@ def add_loss_arguments(parser):
                         help="Weight of class-balanced TAB/TS/EOS marginal supervision.")
     parser.add_argument("--conditional-pitch", action="store_true",
                         help="Normalize auxiliary pitch probability over playable TAB tokens only.")
+    parser.add_argument("--position-alpha", type=float, default=0.0,
+                        help="Weight of mean |expected fret - target fret| over fretted notes.")
+    parser.add_argument("--span-alpha", type=float, default=0.0,
+                        help="Weight of the per-onset expected hand-span hinge.")
+    parser.add_argument("--span-margin", type=int, default=4,
+                        help="Fret span (max-min expected fret, opens excluded) tolerated before the hinge bites.")
+    parser.add_argument("--stretch-alpha", type=float, default=0.0,
+                        help="Weight of the per-note neighbourhood-deviation hinge (midi-to-tab MAX_DEVIATION).")
+    parser.add_argument("--stretch-margin", type=int, default=5,
+                        help="Fret deviation from the +/-5-note local mean tolerated before the hinge bites.")
 
 
 def loss_config_from_args(args):
@@ -32,7 +42,12 @@ def loss_config_from_args(args):
                       smoothing=args.equivalence_smoothing,
                        max_fret=args.loss_max_fret,
                        type_alpha=getattr(args, 'event_type_alpha', 0.0),
-                       conditional_pitch=getattr(args, 'conditional_pitch', False))
+                       conditional_pitch=getattr(args, 'conditional_pitch', False),
+                       position_alpha=getattr(args, 'position_alpha', 0.0),
+                       span_alpha=getattr(args, 'span_alpha', 0.0),
+                       span_margin=getattr(args, 'span_margin', 4),
+                       stretch_alpha=getattr(args, 'stretch_alpha', 0.0),
+                       stretch_margin=getattr(args, 'stretch_margin', 5))
 
 
 def validate_loss_cache(cache_dir, config):
@@ -95,6 +110,11 @@ class TabLossTrainer(Trainer):
         saved_loss.setdefault("ce_weight", 1.0)
         saved_loss.setdefault("type_alpha", 0.0)
         saved_loss.setdefault("conditional_pitch", False)
+        saved_loss.setdefault("position_alpha", 0.0)
+        saved_loss.setdefault("span_alpha", 0.0)
+        saved_loss.setdefault("span_margin", 4)
+        saved_loss.setdefault("stretch_alpha", 0.0)
+        saved_loss.setdefault("stretch_margin", 5)
         saved_loss["version"] = 2
         if saved_loss != self.tab_loss_config.to_dict():
             raise ValueError("Checkpoint loss differs from requested loss; use identical flags for resume, "
@@ -138,8 +158,12 @@ class TabLossTrainer(Trainer):
         terms = {"ce": parts["ce"] * parts["tokens"],
                  "type": parts["type"] * parts["tokens"],
                  "pitch": parts["pitch"] * parts["notes"],
+                 "position": parts["position"] * parts["notes"],
+                 "span": parts["span"] * parts["span_groups"],
+                 "stretch": parts["stretch"] * parts["notes"],
                  "smoothing_delta": parts["smoothing_delta"] * parts["tokens"],
                  "tokens": parts["tokens"], "notes": parts["notes"],
+                 "groups": parts["span_groups"],
                  "smoothed_notes": parts["smoothed_notes"]}
         for name, value in terms.items():
             bucket[name] = bucket.get(name, 0) + value
@@ -166,6 +190,18 @@ class TabLossTrainer(Trainer):
                 prefix + "weighted_ce_loss": self.tab_loss_config.ce_weight * values["ce"] / max(values["tokens"], 1),
                 prefix + "weighted_pitch_loss": self.tab_loss_config.pitch_alpha * values["pitch"] / max(values["notes"], 1),
                 prefix + "weighted_smoothing_delta": self.tab_loss_config.ce_weight * values["smoothing_delta"] / max(values["tokens"], 1),
+                prefix + "position_loss": values["position"] / max(values["notes"], 1),
+                prefix + "span_loss": values["span"] / max(values["groups"], 1),
+                prefix + "stretch_loss": values["stretch"] / max(values["notes"], 1),
+                prefix + "position_alpha": self.tab_loss_config.position_alpha,
+                prefix + "span_alpha": self.tab_loss_config.span_alpha,
+                prefix + "span_margin": self.tab_loss_config.span_margin,
+                prefix + "stretch_alpha": self.tab_loss_config.stretch_alpha,
+                prefix + "stretch_margin": self.tab_loss_config.stretch_margin,
+                prefix + "span_groups": values["groups"],
+                prefix + "weighted_position_loss": self.tab_loss_config.position_alpha * values["position"] / max(values["notes"], 1),
+                prefix + "weighted_span_loss": self.tab_loss_config.span_alpha * values["span"] / max(values["groups"], 1),
+                prefix + "weighted_stretch_loss": self.tab_loss_config.stretch_alpha * values["stretch"] / max(values["notes"], 1),
             })
             bucket.clear()
         return super().log(logs, start_time=start_time)

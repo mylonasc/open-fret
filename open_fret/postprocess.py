@@ -43,6 +43,96 @@ class CorrectionError(ValueError):
         super().__init__(message)
 
 
+@dataclass
+class RelocationReport:
+    checked: int = 0
+    relocated: int = 0
+    out_of_range: int = 0
+    unavailable: int = 0
+    details: list[str] = field(default_factory=list)
+
+
+def relocate_deviating_notes(notes, *, tuning=None, capo=0, max_fret=MAX_FRET,
+                             max_deviation=5, window=5):
+    """Move outlier notes toward the local hand position (midi-to-tab §4.4).
+
+    For each note in start order, compare its fret against the mean fret of
+    the ``window`` notes on each side (open strings excluded from the mean).
+    A note above ``max_fret`` or deviating more than ``max_deviation`` is
+    relocated: an open string is preferred, else the free string whose
+    required fret is closest to the neighbourhood mean. Fretting whose pitch
+    cannot be preserved exactly is never applied — input pitch is identity.
+    Returns (new_notes, report); input order is preserved.
+    """
+    tuning = list(tuning) if tuning is not None else list(DEFAULT_TUNING)
+    ordered = sorted(notes, key=lambda n: (n["start"], n["pitch"], str(n.get("id", ""))))
+    out = [dict(n) for n in notes]
+    by_id = {id(n): o for n, o in zip(notes, out)}
+    report = RelocationReport(checked=len(ordered))
+    for i, note in enumerate(ordered):
+        window_notes = ordered[max(0, i - window):i + window + 1]
+        fretted = [n["fret"] for n in window_notes if n["fret"] > 0]
+        if not fretted:
+            continue
+        mean = sum(fretted) / len(fretted)
+        if not (note["fret"] > max_fret or abs(note["fret"] - mean) > max_deviation):
+            continue
+        pitch = note["pitch"]
+        options = []
+        for s, base in enumerate(tuning, 1):
+            need = pitch - base - capo
+            if not 0 <= need <= max_fret:
+                continue
+            busy = any(other is not note and other["string"] == s
+                       and other["start"] < note["end"] and note["start"] < other["end"]
+                       for other in ordered)
+            if not busy:
+                options.append((s, need))
+        if not options:
+            report.unavailable += 1
+            report.details.append(f"no free string for note {note.get('id', '?')} pitch {pitch}")
+            continue
+        opens = [s for s, need in options if need == 0]
+        if opens:
+            string, fret = min(opens), 0
+        else:
+            string, fret = min(options, key=lambda sf: (abs(sf[1] - mean), sf[1], sf[0]))
+        if (string, fret) == (note["string"], note["fret"]):
+            continue
+        if tuning[string - 1] + capo + fret != pitch:
+            report.unavailable += 1
+            report.details.append(f"pitch identity violated for note {note.get('id', '?')}")
+            continue
+        target = by_id[id(note)]
+        target["string"], target["fret"] = string, fret
+        target.pop("tech", None)
+        report.relocated += 1
+        if note["fret"] > max_fret:
+            report.out_of_range += 1
+        report.details.append(
+            f"note {note.get('id', '?')}: ({note['string']},{note['fret']})"
+            f" -> ({string},{fret}) at mean {mean:.1f}")
+    validate_fingerings(out, tuning, capo, max_fret)
+    return out, report
+
+
+def notes_to_tab_tokens(notes):
+    """Emit TAB/TS tokens from notes with absolute ticks (render convention:
+    each attack sustains until the next onset tick)."""
+    by_tick = {}
+    for note in notes:
+        by_tick.setdefault(note["start"], []).append(note)
+    tick, output = 0, []
+    for time in sorted(set(by_tick) | {n["end"] for n in notes}):
+        if time > tick:
+            output.append(f"TS_{time - tick}")
+        tick = time
+        for note in by_tick.get(time, []):
+            effect = f"_{note['tech']}" if note.get("tech") else ""
+            output.append(f"TAB_{note['string']}_{note['fret']}{effect}")
+    return output
+
+
 class NeighborSearchCorrector:
     def __init__(self, tuning=None, max_fret=MAX_FRET, capo=0, max_states=100000):
         self.tuning = list(tuning) if tuning is not None else list(DEFAULT_TUNING)
@@ -147,18 +237,7 @@ class NeighborSearchCorrector:
         validate_fingerings(assigned, tuning, capo, self.max_fret)
         report.corrected_notes = assigned
         # Preserve the full source time axis, including note-off-only ticks.
-        by_tick = {}
-        for note in assigned:
-            by_tick.setdefault(note['start'], []).append(note)
-        tick, output = 0, []
-        for time in sorted(set(by_tick) | {n['end'] for n in assigned}):
-            if time > tick:
-                output.append(f"TS_{time - tick}")
-            tick = time
-            for note in by_tick.get(time, []):
-                effect = f"_{note['tech']}" if note.get('tech') else ''
-                output.append(f"TAB_{note['string']}_{note['fret']}{effect}")
-        return output, report
+        return notes_to_tab_tokens(assigned), report
 
 
 def neighbor_search(pred_tokens, input_midi_tokens, tuning=DEFAULT_TUNING):

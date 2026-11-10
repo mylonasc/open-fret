@@ -263,7 +263,9 @@ class TrainLoggerCallback(TrainerCallback):
                 if "learning_rate" in logs:
                     log_str += f"LR: {logs['learning_rate']:.2e} | "
                 for key in ("ce_loss", "pitch_loss", "equivalence_smoothing_delta",
-                            "eval_ce_loss", "eval_pitch_loss", "eval_equivalence_smoothing_delta"):
+                            "position_loss", "span_loss", "stretch_loss",
+                            "eval_ce_loss", "eval_pitch_loss", "eval_equivalence_smoothing_delta",
+                            "eval_position_loss", "eval_span_loss", "eval_stretch_loss"):
                     if key in logs:
                         log_str += f"{key}: {logs[key]:.5f} | "
                 f.write(log_str + "\n")
