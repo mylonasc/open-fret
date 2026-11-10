@@ -20,7 +20,9 @@ sidebar_position: 5
   onset); unsupported input is reported, never hallucinated.
 - **Selection.** Validation metrics only. A frozen five-window panel is
   decoded every validation round with playable viewers (`samples/step-*/`,
-  `viewer.html` + `index.html` history); the held-out test split is cached
+  `viewer.html` + `index.html` history); HPO trials do the same per trial
+  (`trial_<n>/samples/` + `viewer.html`, indexed in `study_summary.json`
+  via the trial user attrs); the held-out test split is cached
   but never used for tuning.
 
 ## Runs

@@ -213,12 +213,21 @@ supervision can lower exact reference-fingering agreement while preserving pitch
 - Optuna accepts the same flags. Use separate `--study-name` and `--output-root`
   per loss ablation; resuming a study with changed loss or recorded tokenizer
   metadata is rejected. Loss weights are fixed per study in this slice; they
-  are not silently added to the hyperparameter search space.
+  are not silently added to the hyperparameter search space. Tune them by
+  comparing studies, one weight combination per study, on the frozen
+  validation panel — and every completed trial now leaves playable generated
+  examples connected to its config (`trial_<n>/samples/` + `viewer.html`,
+  `songs`/`viewer` recorded in the trial user attrs and thus in
+  `study_summary.json`), so weight choices can be judged later by listening,
+  not just by `eval_loss`:
 
 ```bash
-python scripts/hpo_optuna.py --study-name pitch-v1 --output-root models/hpo-pitch-v1 \
-  --storage sqlite:///hpo-losses.db --cache-dir dataset/processed/loss-v2/cache \
-  --tokenizer-dir dataset/processed/loss-v2/tab_tokenizer --pitch-loss-alpha 0.3
+python scripts/hpo_optuna.py --study-name span-v1 --output-root models/hpo-span-v1 \
+  --storage sqlite:///hpo-losses.db --cache-dir dataset/processed/loss-v4-curated-20261109/cache \
+  --tokenizer-dir dataset/processed/loss-v4-curated-20261109/tab_tokenizer \
+  --sample-data-dir dataset/processed/loss-v4-curated-20261109/individual \
+  --sample-val-files dataset/processed/loss-v4-curated-20261109/val_files.txt \
+  --sample-songs 5 --span-alpha 0.5
 ```
 
 ## Independent loss/label audit

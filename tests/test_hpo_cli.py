@@ -20,7 +20,10 @@ def test_persistent_trials_pruning_export_and_retraining(fixture_cache):
                '--tokenizer-dir', str(fixture_cache / 'tokenizer'),
                '--cache-dir', str(fixture_cache / 'cache'), '--output-root', str(out),
                '--max-steps', '2', '--eval-steps', '1', '--time-limit', '60',
-               '--gpu-monitor-interval', '0']
+               '--gpu-monitor-interval', '0',
+               '--sample-data-dir', str(fixture_cache / 'individual'),
+               '--sample-val-files', str(fixture_cache / 'fixture_files.txt'),
+               '--sample-songs', '1', '--sample-beams', '1']
     env = {**os.environ, 'CUDA_VISIBLE_DEVICES': '', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
     first = subprocess.run(command + ['--trials', '2', '--pruner', 'none'], env=env, cwd=ROOT,
                            capture_output=True, text=True, timeout=90)
@@ -46,6 +49,14 @@ def test_persistent_trials_pruning_export_and_retraining(fixture_cache):
     summary = json.loads((out / 'study_summary.json').read_text())
     assert summary['direction'] == 'minimize'
     assert summary['data_protocol']['validation_fingerprint']
+    # Every completed trial leaves generated examples connected to its config.
+    for trial_dir in [out / f'trial_{t.number}' for t in study.trials
+                      if t.state == optuna.trial.TrialState.COMPLETE]:
+        manifest = json.loads((trial_dir / 'samples' / 'manifest.json').read_text())
+        assert len(manifest['songs']) == 1 and manifest['songs'][0]['n_pred'] > 0
+        assert (trial_dir / 'samples' / 'viewer.html').read_text().count('ofv-') > 0
+    assert all(t.user_attrs['sample_export']['songs'] == 1
+               for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE)
     # Export is consumed directly by the normal training CLI, without translating flags.
     retrain = subprocess.run([sys.executable, str(ROOT / 'scripts/train_model.py'),
                               '--hpo-config', str(out / 'best_config.json'),

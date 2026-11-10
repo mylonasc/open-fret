@@ -60,7 +60,21 @@ winner: per the [losses roadmap](losses.md#roadmap), each term still needs a
 same-decoder CE-control comparison on *generated-note* metrics before any
 promotion claim. Scalar `eval_loss` values across different objectives are
 not comparable — the study metadata records the full loss config alongside
-every trial so nobody mixes them up.
+every trial so nobody mixes them up. To make the comparison audible later,
+pass the sample panel explicitly — every completed trial then writes playable
+fixed-window examples connected to its config:
+
+```bash
+python scripts/hpo_optuna.py --study-name span-v1 ... \
+  --sample-data-dir dataset/processed/loss-v4-curated-20261109/individual \
+  --sample-val-files dataset/processed/loss-v4-curated-20261109/val_files.txt \
+  --sample-songs 5 --span-alpha 0.5
+```
+
+This yields `trial_<n>/samples/` (`.input/.pred/.ref.txt`, `.tex`,
+`manifest.json`) plus `viewer.html`, with the song count, viewer path and
+validation loss recorded in the trial user attrs (hence in
+`study_summary.json`).
 
 ## Practical notes
 
