@@ -203,6 +203,47 @@ $\mathrm{tuning}[s-1] + \mathrm{fret} = 78$ within the 24-fret limit, e.g.
 marginal sums probability over exactly these equivalent tokens; smoothing
 splits $\varepsilon$ uniformly across the plain (technique-free) ones.
 
+## Playability weight screen — blind-listening result (2026-11-10)
+
+Eight studies (one weight combination each, 2 trials each, 45-min cap) on the
+loss-v4 corpus, all on the shared base (`w_ce=0.3`, pitch 1.0, smoothing 0.1,
+type 0.3, conditional). Each trial exported the same fixed 5-song panel with a
+playable viewer; selection was by ear only, never by `eval_loss`.
+
+**Method.** Blind A/B in `helper_apps/pair_judge` (sides randomized, trial
+identities hidden until voting). Pool: all unordered trial pairs per shared
+song (600 pairs). Judged 2026-11-10 20:41–21:14 UTC, single judge (`anon`):
+46 judgments — 27 decided (14 left / 12 right / 1 tie) + 19 skipped
+(unrenderable or unjudgeable). Elo, base 1500 / K=24, recomputed in vote order
+from `helper_apps/pair_judge/votes.db`.
+
+**Winner: `play-pos05-stretch05`** (`--position-alpha 0.5 --stretch-alpha 0.5`).
+Study aggregate 7 wins / 8 decided (tie-free win rate 0.88); both its trials sit
+in the top 3 by Elo:
+
+| trial | Elo | decided | wins |
+|---|---|---|---|
+| pos05-stretch05/trial_0 | 1541.8 | 6 | 5 |
+| stretch05/trial_1 | 1526.5 | 6 | 4 |
+| pos05-stretch05/trial_1 | 1524.0 | 2 | 2 |
+| base/trial_0 | 1523.5 | 6 | 4 |
+| span05/trial_1 | 1453.3 | 4 | 0 |
+| span05-stretch05/trial_1 | 1455.5 | 4 | 0 |
+
+Study win rates: pos05-stretch05 0.88, stretch05 0.71, pos05 0.67, base / all05
+/ pos05-span05 ~0.50, span05 0.22, span05-stretch05 0.00 (only 5 decided —
+sparse-coverage outlier, treat with caution).
+
+**Core insight.** The stretch term (neighbourhood-deviation hinge, margin 5)
+prices what judges actually hear: lone-note *jumps* far from the ±5-note local
+mean — stray high-position notes between open-position phrases. The span term
+(per-onset max−min hinge, margin 4) prices chord *width*, but on this corpus
+98.9% of onsets already span ≤ 4, so it fires only on the top ~1% shapes and
+adds almost no audible signal at a 45-minute training budget — span-only and
+span-combination studies sink to the bottom. Position alone is neutral (≈ base);
+it helps only combined with stretch. Caveats: sparse coverage (46/600 pairs),
+one judge, time-capped (directional, not converged) trials.
+
 ## Roadmap
 
 Implemented (S2 slice): pitch marginal, conditional variant, event-type

@@ -174,6 +174,22 @@ python scripts/train_model.py --run-name play-v1 \
   string, pitch preserved by construction); opt in with
   `scripts/inference.py --relocate-deviating`.
 
+### Playability weight screen result (2026-11-10, blind A/B)
+
+Grid `scripts/run_playability_hpo.sh`: 8 studies × 2 trials on loss-v4
+(base `w_ce=0.3`, pitch 1.0, smoothing 0.1, type 0.3, conditional; playability
+weights 0/0.5 per study). Judged by ear in `helper_apps/pair_judge`
+(600-pair pool, blinded sides, 2026-11-10 single-`anon` session: 27 decided +
+19 skipped). Elo base 1500/K=24 from `helper_apps/pair_judge/votes.db`.
+
+Winner: **play-pos05-stretch05** (`--position-alpha 0.5 --stretch-alpha 0.5`) —
+7/8 decided (wr 0.88), trials Elo 1541.8 (5/6) and 1524.0 (2/2). Runner-up
+stretch-only (5/7, wr 0.71). Span-only 2/9 (wr 0.22) and span05-stretch05 0/5
+anchor the bottom. Takeaway: the stretch hinge (jump vs ±5-note mean, margin 5)
+is the audible term; the span hinge (chord width, margin 4) fires on only ~1%
+of onsets and adds no signal at this budget; position alone ≈ base. Sparse
+single-judge coverage — directional, not converged.
+
 All three log raw and weighted components (`position_loss`, `span_loss`,
 `stretch_loss`, `span_groups`) with the same per-microbatch means convention.
 Loss weights are fixed per Optuna study (same-study reuse with changed loss
